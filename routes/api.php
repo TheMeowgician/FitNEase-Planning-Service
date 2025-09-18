@@ -6,6 +6,9 @@ use App\Http\Controllers\WorkoutPlanController;
 use App\Http\Controllers\WorkoutScheduleController;
 use App\Http\Controllers\AIRecommendationController;
 use App\Http\Controllers\AnalyticsController;
+use App\Http\Controllers\ServiceTestController;
+use App\Http\Controllers\ServiceCommunicationTestController;
+use App\Http\Controllers\ServiceIntegrationDemoController;
 
 Route::get('/user', function (Request $request) {
     return $request->attributes->get('user');
@@ -60,4 +63,22 @@ Route::prefix('planning')->middleware('auth.api')->group(function () {
     Route::get('/completion-trends/{userId}', [AnalyticsController::class, 'getCompletionTrends']);
     Route::get('/workout-insights/{userId}', [AnalyticsController::class, 'getWorkoutInsights']);
 
+});
+
+// Service Communication Testing Routes (Protected)
+Route::middleware('auth.api')->group(function () {
+    Route::get('/test-services', [ServiceTestController::class, 'testAllServices']);
+    Route::get('/test-service/{serviceName}', [ServiceTestController::class, 'testSpecificService']);
+    Route::get('/service-test/connectivity', [ServiceCommunicationTestController::class, 'testServiceConnectivity']);
+    Route::get('/service-test/communications', [ServiceCommunicationTestController::class, 'testIncomingCommunications']);
+    Route::get('/service-test/token-validation', [ServiceCommunicationTestController::class, 'testPlanningTokenValidation']);
+});
+
+// Service Integration Demo Routes (Public - No Auth Required)
+Route::prefix('demo')->group(function () {
+    Route::get('/integrations', [ServiceIntegrationDemoController::class, 'getServiceIntegrationOverview']);
+    Route::get('/content-service', [ServiceIntegrationDemoController::class, 'demoContentServiceCall']);
+    Route::get('/ml-service', [ServiceIntegrationDemoController::class, 'demoMLServiceCall']);
+    Route::get('/tracking-service', [ServiceIntegrationDemoController::class, 'demoTrackingServiceCall']);
+    Route::get('/engagement-service', [ServiceIntegrationDemoController::class, 'demoEngagementServiceCall']);
 });
