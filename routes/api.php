@@ -8,10 +8,20 @@ use App\Http\Controllers\AIRecommendationController;
 use App\Http\Controllers\AnalyticsController;
 
 Route::get('/user', function (Request $request) {
-    return $request->user();
-})->middleware('auth:sanctum');
+    return $request->attributes->get('user');
+})->middleware('auth.api');
 
-Route::prefix('planning')->group(function () {
+// Health check endpoint
+Route::get('/health', function () {
+    return response()->json([
+        'status' => 'healthy',
+        'service' => 'fitnease-planning',
+        'timestamp' => now()->toISOString(),
+        'version' => '1.0.0'
+    ]);
+})->name('health.check');
+
+Route::prefix('planning')->middleware('auth.api')->group(function () {
 
     // Plan Management Routes
     Route::get('/workout-plan/{userId}', [WorkoutPlanController::class, 'getPersonalizedPlan']);
