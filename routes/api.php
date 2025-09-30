@@ -33,6 +33,7 @@ Route::prefix('planning')->middleware('auth.api')->group(function () {
     Route::delete('/plan/{id}', [WorkoutPlanController::class, 'deletePlan']);
     Route::get('/plans/{userId}', [WorkoutPlanController::class, 'getUserPlans']);
     Route::put('/plan/{id}/customize', [WorkoutPlanController::class, 'customizePlan']);
+    Route::post('/workout-plan-with-schedule', [WorkoutPlanController::class, 'createWorkoutPlanWithSchedule']);
 
     // Schedule Management Routes
     Route::post('/schedule', [WorkoutScheduleController::class, 'createSchedule']);
