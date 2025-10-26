@@ -52,7 +52,7 @@ jobs:
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               $EC2_USERNAME@$EC2_HOST \
-              "bash -l -c '~/fitnease/deploy-service.sh planning'"
+              "sg docker -c 'bash ~/fitnease/deploy-service.sh planning'"
 
           # Clean up SSH key
           rm -f ~/.ssh/deploy_key.pem
