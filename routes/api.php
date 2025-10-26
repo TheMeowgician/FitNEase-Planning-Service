@@ -9,6 +9,7 @@ use App\Http\Controllers\AnalyticsController;
 use App\Http\Controllers\ServiceTestController;
 use App\Http\Controllers\ServiceCommunicationTestController;
 use App\Http\Controllers\ServiceIntegrationDemoController;
+use App\Http\Controllers\WeeklyPlanController;
 
 Route::get('/user', function (Request $request) {
     return $request->attributes->get('user');
@@ -63,6 +64,12 @@ Route::prefix('planning')->middleware('auth.api')->group(function () {
     Route::get('/adherence-report/{userId}', [AnalyticsController::class, 'getUserAdherenceReport']);
     Route::get('/completion-trends/{userId}', [AnalyticsController::class, 'getCompletionTrends']);
     Route::get('/workout-insights/{userId}', [AnalyticsController::class, 'getWorkoutInsights']);
+
+    // Weekly Workout Plans Routes (Feature #4)
+    Route::post('/weekly-plans/generate', [WeeklyPlanController::class, 'generateWeeklyPlan']);
+    Route::get('/weekly-plans/current', [WeeklyPlanController::class, 'getCurrentWeekPlan']);
+    Route::get('/weekly-plans/week/{date}', [WeeklyPlanController::class, 'getWeekPlan']);
+    Route::post('/weekly-plans/{id}/complete-day', [WeeklyPlanController::class, 'completeDayWorkout']);
 
 });
 
