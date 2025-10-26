@@ -25,13 +25,56 @@ Route::get('/health', function () {
     ]);
 })->name('health.check');
 
-// PUBLIC TEST ROUTE - No authentication required (for testing)
+// PUBLIC TEST ROUTES - No authentication required (for testing Feature #4)
 Route::prefix('planning/public')->group(function () {
-    Route::get('/test-weekly-plan', function(Request $request) {
+    // Test 1: Get current week plan
+    Route::get('/test-current-plan', function(Request $request) {
         try {
             $controller = new WeeklyPlanController();
             $testRequest = new Request(['user_id' => 2040]);
             return $controller->getCurrentWeekPlan($testRequest);
+        } catch (\Exception $e) {
+            return response()->json([
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ], 500);
+        }
+    });
+
+    // Test 2: Generate weekly plan
+    Route::post('/test-generate-plan', function(Request $request) {
+        try {
+            $controller = new WeeklyPlanController();
+            $testRequest = new Request(['user_id' => 2040, 'regenerate' => true]);
+            return $controller->generateWeeklyPlan($testRequest);
+        } catch (\Exception $e) {
+            return response()->json([
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ], 500);
+        }
+    });
+
+    // Test 3: Get specific week plan
+    Route::get('/test-week-plan/{date}', function($date, Request $request) {
+        try {
+            $controller = new WeeklyPlanController();
+            $testRequest = new Request(['user_id' => 2040]);
+            return $controller->getWeekPlan($date, $testRequest);
+        } catch (\Exception $e) {
+            return response()->json([
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ], 500);
+        }
+    });
+
+    // Test 4: Complete day workout
+    Route::post('/test-complete-day/{id}', function($id, Request $request) {
+        try {
+            $controller = new WeeklyPlanController();
+            $testRequest = new Request(['day' => 'sunday']);
+            return $controller->completeDayWorkout($id, $testRequest);
         } catch (\Exception $e) {
             return response()->json([
                 'error' => $e->getMessage(),
