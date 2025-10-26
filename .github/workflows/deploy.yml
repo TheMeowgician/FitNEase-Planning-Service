@@ -1,0 +1,79 @@
+###############################################################################
+# FitNEase Planning Service - Auto-Deployment Workflow
+#
+# This workflow automatically deploys the Planning service to EC2 when code
+# is pushed to the master branch.
+#
+# Required GitHub Secrets (add in repository settings):
+# - EC2_HOST: Your EC2 instance IP (18.136.99.170)
+# - EC2_USERNAME: EC2 username (ubuntu)
+# - EC2_SSH_KEY: Contents of your fitnease-key.pem file
+###############################################################################
+
+name: Deploy Planning Service to EC2
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🚀 Deploy to EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          # Create SSH directory
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          # Add SSH key
+          echo "$EC2_SSH_KEY" > ~/.ssh/deploy_key.pem
+          chmod 600 ~/.ssh/deploy_key.pem
+
+          # Add EC2 host to known_hosts
+          ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts 2>/dev/null
+
+          # Deploy using SSH
+          echo "🔧 Deploying Planning service to EC2..."
+          ssh -i ~/.ssh/deploy_key.pem \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              $EC2_USERNAME@$EC2_HOST \
+              "bash ~/fitnease/deploy-service.sh planning"
+
+          # Clean up SSH key
+          rm -f ~/.ssh/deploy_key.pem
+
+      - name: ✅ Deployment Summary
+        run: |
+          echo "🎉 Deployment completed!"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Service: Planning"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Deployed by: ${{ github.actor }}"
+          echo "Time: $(date)"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: ❌ Notify on failure
+        if: failure()
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "❌ Deployment failed!"
+          echo "Service: Planning"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Please check the logs above for details"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          exit 1
