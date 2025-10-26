@@ -25,6 +25,22 @@ Route::get('/health', function () {
     ]);
 })->name('health.check');
 
+// PUBLIC TEST ROUTE - No authentication required (for testing)
+Route::prefix('planning/public')->group(function () {
+    Route::get('/test-weekly-plan', function(Request $request) {
+        try {
+            $controller = new WeeklyPlanController();
+            $testRequest = new Request(['user_id' => 2040]);
+            return $controller->getCurrentWeekPlan($testRequest);
+        } catch (\Exception $e) {
+            return response()->json([
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ], 500);
+        }
+    });
+});
+
 Route::prefix('planning')->middleware('auth.api')->group(function () {
 
     // DEBUG ROUTE - Test if routes work at all
