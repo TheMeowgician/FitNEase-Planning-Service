@@ -30,6 +30,7 @@ jobs:
 
       - name: 🚀 Deploy to EC2
         env:
+          # GitHub Secrets - these are configured in repository settings
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
           EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
