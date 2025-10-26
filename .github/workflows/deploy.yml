@@ -46,35 +46,53 @@ jobs:
           # Add EC2 host to known_hosts
           ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts 2>/dev/null
 
-          # Deploy using SSH
+          # Deploy using SSH with TTY (important for sg docker)
           echo "🔧 Deploying Planning service to EC2..."
           ssh -i ~/.ssh/deploy_key.pem \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
+              -tt \
               $EC2_USERNAME@$EC2_HOST \
-              "sg docker -c 'bash ~/fitnease/deploy-service.sh planning'"
+              'sg docker -c "bash ~/fitnease/deploy-service.sh planning"' 2>&1 || true
+
+          # Check deployment status from log
+          echo ""
+          echo "📊 Verifying deployment status..."
+          RESULT=$(ssh -i ~/.ssh/deploy_key.pem \
+              -o StrictHostKeyChecking=no \
+              $EC2_USERNAME@$EC2_HOST \
+              'tail -1 ~/fitnease/deployment.log | grep -q "successfully" && echo "success" || echo "failed"')
 
           # Clean up SSH key
           rm -f ~/.ssh/deploy_key.pem
 
+          # Exit with proper code based on verification
+          if [ "$RESULT" != "success" ]; then
+            echo "❌ Deployment verification failed!"
+            echo "Please check EC2 logs: ssh ubuntu@$EC2_HOST 'cat ~/fitnease/deployment.log'"
+            exit 1
+          fi
+
+          echo "✅ Deployment verified successfully!"
+
       - name: ✅ Deployment Summary
         run: |
           echo "🎉 Deployment completed!"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "Service: Planning"
           echo "Branch: ${{ github.ref_name }}"
           echo "Commit: ${{ github.sha }}"
           echo "Deployed by: ${{ github.actor }}"
           echo "Time: $(date)"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
       - name: ❌ Notify on failure
         if: failure()
         run: |
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "❌ Deployment failed!"
           echo "Service: Planning"
           echo "Branch: ${{ github.ref_name }}"
           echo "Please check the logs above for details"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           exit 1
