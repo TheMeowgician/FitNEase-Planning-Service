@@ -99,6 +99,24 @@ Route::prefix('planning/public')->group(function () {
             })
         ]);
     });
+
+    // Debug: Fix plan flags
+    Route::post('/debug-fix-plan/{planId}', function($planId) {
+        $plan = \App\Models\WeeklyWorkoutPlan::findOrFail($planId);
+        $plan->is_current_week = true;
+        $plan->is_active = true;
+        $plan->save();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Plan flags updated',
+            'plan' => [
+                'plan_id' => $plan->plan_id,
+                'is_current_week' => $plan->is_current_week,
+                'is_active' => $plan->is_active
+            ]
+        ]);
+    });
 });
 
 Route::prefix('planning')->middleware('auth.api')->group(function () {
