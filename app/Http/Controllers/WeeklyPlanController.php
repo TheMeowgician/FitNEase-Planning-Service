@@ -93,11 +93,12 @@ class WeeklyPlanController extends Controller
             // Calculate week end date (Sunday)
             $weekEndDate = $weekStartDate->copy()->endOfWeek();
 
-            // Deactivate old plan if regenerating
+            // Delete old plan if regenerating
             if ($existingPlan) {
-                $existingPlan->is_active = false;
-                $existingPlan->is_current_week = false;
-                $existingPlan->save();
+                Log::info('[WEEKLY_PLAN] Deleting existing plan for regeneration', [
+                    'old_plan_id' => $existingPlan->plan_id
+                ]);
+                $existingPlan->delete();
             }
 
             // Create new weekly plan
