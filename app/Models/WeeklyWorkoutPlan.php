@@ -64,12 +64,12 @@ class WeeklyWorkoutPlan extends Model
     ];
 
     /**
-     * Get the user that owns this weekly plan
+     * NOTE: In a microservices architecture, we do NOT use Eloquent relationships
+     * across service boundaries. User data should be fetched from the auth service
+     * via HTTP when needed (which the controller already does).
+     *
+     * Removed user() relationship to prevent serialization errors.
      */
-    public function user()
-    {
-        return $this->belongsTo(User::class, 'user_id', 'user_id');
-    }
 
     /**
      * Check if this plan is for the current week
