@@ -368,7 +368,7 @@ class WeeklyPlanController extends Controller
         try {
             $mlServiceUrl = env('ML_SERVICE_URL', 'http://fitnease-ml:5000');
 
-            $response = Http::timeout(30)->post("{$mlServiceUrl}/generate-weekly-plan", [
+            $response = Http::timeout(30)->post("{$mlServiceUrl}/api/v1/generate-weekly-plan", [
                 'user_id' => $userData['user_id'],
                 'workout_days' => $userData['preferred_workout_days'],
                 'fitness_level' => $userData['fitness_level'],
