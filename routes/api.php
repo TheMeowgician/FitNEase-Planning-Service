@@ -27,6 +27,21 @@ Route::get('/health', function () {
 
 Route::prefix('planning')->middleware('auth.api')->group(function () {
 
+    // DEBUG ROUTE - Test if routes work at all
+    Route::get('/test-simple', function() {
+        return response()->json(['message' => 'Simple route works']);
+    });
+
+    // DEBUG ROUTE - Test WeeklyPlanController
+    Route::get('/test-controller', function() {
+        try {
+            $controller = new \App\Http\Controllers\WeeklyPlanController();
+            return response()->json(['message' => 'Controller instantiated successfully']);
+        } catch (\Exception $e) {
+            return response()->json(['error' => $e->getMessage()], 500);
+        }
+    });
+
     // Plan Management Routes
     Route::get('/workout-plan/{userId}', [WorkoutPlanController::class, 'getPersonalizedPlan']);
     Route::post('/create-plan', [WorkoutPlanController::class, 'createPlan']);
