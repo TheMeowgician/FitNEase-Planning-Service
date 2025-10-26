@@ -1,13 +1,6 @@
 ###############################################################################
 # FitNEase Planning Service - Auto-Deployment Workflow
-#
-# This workflow automatically deploys the Planning service to EC2 when code
-# is pushed to the master branch.
-#
-# Required GitHub Secrets (add in repository settings):
-# - EC2_HOST: Your EC2 instance IP (18.136.99.170)
-# - EC2_USERNAME: EC2 username (ubuntu)
-# - EC2_SSH_KEY: Contents of your fitnease-key.pem file
+# Simplified version without TTY for GitHub Actions compatibility
 ###############################################################################
 
 name: Deploy Planning Service to EC2
@@ -17,7 +10,7 @@ on:
     branches:
       - master
       - main
-  workflow_dispatch:  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -30,69 +23,37 @@ jobs:
 
       - name: 🚀 Deploy to EC2
         env:
-          # GitHub Secrets - these are configured in repository settings
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
           EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
         run: |
-          # Create SSH directory
+          # Setup SSH
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-
-          # Add SSH key
           echo "$EC2_SSH_KEY" > ~/.ssh/deploy_key.pem
           chmod 600 ~/.ssh/deploy_key.pem
-
-          # Add EC2 host to known_hosts
           ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts 2>/dev/null
 
-          # Deploy using SSH with TTY (important for sg docker)
+          # Deploy - run script in a subshell with docker group
           echo "🔧 Deploying Planning service to EC2..."
           ssh -i ~/.ssh/deploy_key.pem \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
-              -tt \
               $EC2_USERNAME@$EC2_HOST \
-              'sg docker -c "bash ~/fitnease/deploy-service.sh planning"' 2>&1 || true
+              'cd ~/fitnease && sg docker -c "bash deploy-service.sh planning"'
 
-          # Check deployment status from log
-          echo ""
-          echo "📊 Verifying deployment status..."
-          RESULT=$(ssh -i ~/.ssh/deploy_key.pem \
-              -o StrictHostKeyChecking=no \
-              $EC2_USERNAME@$EC2_HOST \
-              'tail -1 ~/fitnease/deployment.log | grep -q "successfully" && echo "success" || echo "failed"')
-
-          # Clean up SSH key
+          # Cleanup
           rm -f ~/.ssh/deploy_key.pem
 
-          # Exit with proper code based on verification
-          if [ "$RESULT" != "success" ]; then
-            echo "❌ Deployment verification failed!"
-            echo "Please check EC2 logs: ssh ubuntu@$EC2_HOST 'cat ~/fitnease/deployment.log'"
-            exit 1
-          fi
-
-          echo "✅ Deployment verified successfully!"
-
-      - name: ✅ Deployment Summary
+      - name: ✅ Success
         run: |
-          echo "🎉 Deployment completed!"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🎉 Deployment completed successfully!"
           echo "Service: Planning"
           echo "Branch: ${{ github.ref_name }}"
-          echo "Commit: ${{ github.sha }}"
-          echo "Deployed by: ${{ github.actor }}"
-          echo "Time: $(date)"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      - name: ❌ Notify on failure
+      - name: ❌ On Failure
         if: failure()
         run: |
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "❌ Deployment failed!"
-          echo "Service: Planning"
-          echo "Branch: ${{ github.ref_name }}"
-          echo "Please check the logs above for details"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Check EC2 logs: ~/fitnease/deployment.log"
           exit 1
