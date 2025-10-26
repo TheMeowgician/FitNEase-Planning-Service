@@ -435,11 +435,14 @@ class WeeklyPlanController extends Controller
                 $exercisesPerDay = $this->getExercisesCountByFitnessLevel($userData['fitness_level']);
                 $durationPerDay = min($timeConstraints, $exercisesPerDay * 4); // 4 min per exercise (Tabata)
 
+                // Fetch exercises from content service
+                $exercises = $this->fetchExercisesFromContent($userData['fitness_level'], $userData['target_muscle_groups'] ?? ['core'], $exercisesPerDay);
+
                 $planData[$day] = [
                     'planned' => true,
                     'rest_day' => false,
                     'workout_type' => 'tabata',
-                    'exercises' => [], // Will be populated later
+                    'exercises' => $exercises,
                     'estimated_duration' => $durationPerDay,
                     'estimated_calories' => $durationPerDay * 7, // Approx 7 cal/min
                     'focus_areas' => $userData['target_muscle_groups'] ?? ['full_body'],
@@ -469,6 +472,77 @@ class WeeklyPlanController extends Controller
             'ml_generated' => false,
             'generation_method' => 'fallback',
         ];
+    }
+
+    /**
+     * Helper: Fetch exercises from Content Service
+     *
+     * @param string $fitnessLevel
+     * @param array $targetMuscleGroups
+     * @param int $count
+     * @return array
+     */
+    protected function fetchExercisesFromContent(string $fitnessLevel, array $targetMuscleGroups, int $count): array
+    {
+        try {
+            $client = new \GuzzleHttp\Client();
+            $response = $client->get(env('CONTENT_SERVICE_URL') . '/api/content/exercises', [
+                'headers' => [
+                    'Accept' => 'application/json',
+                    'X-Service-Token' => env('INTERNAL_SERVICE_TOKEN'),
+                ],
+                'query' => [
+                    'difficulty' => $fitnessLevel,
+                    'muscle_groups' => implode(',', $targetMuscleGroups),
+                    'limit' => $count,
+                ],
+                'timeout' => 5,
+            ]);
+
+            $data = json_decode($response->getBody()->getContents(), true);
+
+            if (!empty($data['data']) && is_array($data['data'])) {
+                return array_map(function($exercise) {
+                    return [
+                        'id' => $exercise['exercise_id'],
+                        'name' => $exercise['name'],
+                        'muscle_group' => $exercise['target_muscle_group'] ?? 'core',
+                        'difficulty' => $exercise['difficulty_level'] ?? 'beginner',
+                        'duration_seconds' => 240, // 4 minutes (Tabata protocol)
+                        'equipment' => $exercise['equipment_needed'] ?? 'none',
+                    ];
+                }, $data['data']);
+            }
+
+            Log::warning('[WEEKLY_PLAN] Content service returned no exercises, using defaults');
+            return $this->getDefaultExercises($count);
+
+        } catch (\Exception $e) {
+            Log::error('[WEEKLY_PLAN] Failed to fetch exercises from content service', [
+                'error' => $e->getMessage()
+            ]);
+            return $this->getDefaultExercises($count);
+        }
+    }
+
+    /**
+     * Helper: Get default exercises as fallback
+     *
+     * @param int $count
+     * @return array
+     */
+    protected function getDefaultExercises(int $count): array
+    {
+        $defaultExercises = [
+            ['id' => 1, 'name' => 'Jumping Jacks', 'muscle_group' => 'full_body', 'difficulty' => 'beginner', 'duration_seconds' => 240, 'equipment' => 'none'],
+            ['id' => 2, 'name' => 'High Knees', 'muscle_group' => 'legs', 'difficulty' => 'beginner', 'duration_seconds' => 240, 'equipment' => 'none'],
+            ['id' => 3, 'name' => 'Mountain Climbers', 'muscle_group' => 'core', 'difficulty' => 'intermediate', 'duration_seconds' => 240, 'equipment' => 'none'],
+            ['id' => 4, 'name' => 'Burpees', 'muscle_group' => 'full_body', 'difficulty' => 'intermediate', 'duration_seconds' => 240, 'equipment' => 'none'],
+            ['id' => 5, 'name' => 'Squats', 'muscle_group' => 'legs', 'difficulty' => 'beginner', 'duration_seconds' => 240, 'equipment' => 'none'],
+            ['id' => 6, 'name' => 'Push-ups', 'muscle_group' => 'chest', 'difficulty' => 'beginner', 'duration_seconds' => 240, 'equipment' => 'none'],
+        ];
+
+        return array_slice($defaultExercises, 0, $count);
     }
 
     /**
