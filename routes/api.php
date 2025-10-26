@@ -74,13 +74,30 @@ Route::prefix('planning/public')->group(function () {
         try {
             $controller = new WeeklyPlanController();
             $testRequest = new Request(['day' => 'sunday']);
-            return $controller->completeDayWorkout($id, $testRequest);
+            return $controller->completeDayWorkout($id, $request);
         } catch (\Exception $e) {
             return response()->json([
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString()
             ], 500);
         }
+    });
+
+    // Debug: Check what's in the database
+    Route::get('/debug-plans/{userId}', function($userId) {
+        $plans = \App\Models\WeeklyWorkoutPlan::where('user_id', $userId)->get();
+        return response()->json([
+            'total_plans' => $plans->count(),
+            'plans' => $plans->map(function($plan) {
+                return [
+                    'plan_id' => $plan->plan_id,
+                    'week_start' => $plan->week_start_date,
+                    'is_current_week' => $plan->is_current_week,
+                    'is_active' => $plan->is_active,
+                    'workouts_completed' => $plan->workouts_completed
+                ];
+            })
+        ]);
     });
 });
 
