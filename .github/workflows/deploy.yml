@@ -1,6 +1,5 @@
 ###############################################################################
 # FitNEase Planning Service - Auto-Deployment Workflow
-# Simplified version without TTY for GitHub Actions compatibility
 ###############################################################################
 
 name: Deploy Planning Service to EC2
@@ -34,13 +33,13 @@ jobs:
           chmod 600 ~/.ssh/deploy_key.pem
           ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts 2>/dev/null
 
-          # Deploy - run script in a subshell with docker group
+          # Deploy - call the wrapper script directly
           echo "🔧 Deploying Planning service to EC2..."
           ssh -i ~/.ssh/deploy_key.pem \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               $EC2_USERNAME@$EC2_HOST \
-              'cd ~/fitnease && sg docker -c "bash deploy-service.sh planning"'
+              'bash ~/fitnease/deploy-planning.sh'
 
           # Cleanup
           rm -f ~/.ssh/deploy_key.pem
@@ -55,5 +54,5 @@ jobs:
         if: failure()
         run: |
           echo "❌ Deployment failed!"
-          echo "Check EC2 logs: ~/fitnease/deployment.log"
+          echo "Check EC2 logs: ssh ubuntu@18.136.99.170 'cat ~/fitnease/deployment.log'"
           exit 1
