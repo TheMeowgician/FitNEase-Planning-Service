@@ -39,7 +39,7 @@ jobs:
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               $EC2_USERNAME@$EC2_HOST \
-              'bash ~/fitnease/deploy-planning.sh'
+              'bash -l /home/ubuntu/fitnease/deploy-planning.sh'
 
           # Cleanup
           rm -f ~/.ssh/deploy_key.pem
