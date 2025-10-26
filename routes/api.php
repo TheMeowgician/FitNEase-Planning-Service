@@ -69,12 +69,14 @@ Route::prefix('planning/public')->group(function () {
         }
     });
 
-    // Test 4: Complete day workout
+    // Test 4: Complete day workout (expects ?day=sunday in query string or JSON body)
     Route::post('/test-complete-day/{id}', function($id, Request $request) {
         try {
             $controller = new WeeklyPlanController();
-            $testRequest = new Request(['day' => 'sunday']);
-            return $controller->completeDayWorkout($id, $request);
+            // Get day from query string or JSON body
+            $day = $request->input('day') ?? $request->query('day') ?? 'sunday';
+            $testRequest = new Request(['day' => $day]);
+            return $controller->completeDayWorkout($id, $testRequest);
         } catch (\Exception $e) {
             return response()->json([
                 'error' => $e->getMessage(),
