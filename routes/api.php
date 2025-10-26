@@ -42,6 +42,21 @@ Route::prefix('planning')->middleware('auth.api')->group(function () {
         }
     });
 
+    // DEBUG ROUTE - Test getCurrentWeekPlan method directly
+    Route::get('/test-get-current', function(Illuminate\Http\Request $request) {
+        try {
+            \Illuminate\Support\Facades\Log::info('[DEBUG] Testing getCurrentWeekPlan');
+            $controller = new \App\Http\Controllers\WeeklyPlanController();
+            $request->merge(['user_id' => 2040]);
+            $result = $controller->getCurrentWeekPlan($request);
+            \Illuminate\Support\Facades\Log::info('[DEBUG] Method executed successfully');
+            return $result;
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('[DEBUG] Method failed: ' . $e->getMessage());
+            return response()->json(['error' => $e->getMessage(), 'trace' => $e->getTraceAsString()], 500);
+        }
+    });
+
     // Plan Management Routes
     Route::get('/workout-plan/{userId}', [WorkoutPlanController::class, 'getPersonalizedPlan']);
     Route::post('/create-plan', [WorkoutPlanController::class, 'createPlan']);
