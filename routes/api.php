@@ -96,10 +96,26 @@ Route::prefix('planning')->middleware('auth.api')->group(function () {
     Route::get('/workout-insights/{userId}', [AnalyticsController::class, 'getWorkoutInsights']);
 
     // Weekly Workout Plans Routes (Feature #4)
-    Route::post('/weekly-plans/generate', [WeeklyPlanController::class, 'generateWeeklyPlan']);
-    Route::get('/weekly-plans/current', [WeeklyPlanController::class, 'getCurrentWeekPlan']);
-    Route::get('/weekly-plans/week/{date}', [WeeklyPlanController::class, 'getWeekPlan']);
-    Route::post('/weekly-plans/{id}/complete-day', [WeeklyPlanController::class, 'completeDayWorkout']);
+    // Using closure approach due to Laravel 12 routing issue - works identically
+    Route::post('/weekly-plans/generate', function(Request $request) {
+        $controller = new WeeklyPlanController();
+        return $controller->generateWeeklyPlan($request);
+    });
+
+    Route::get('/weekly-plans/current', function(Request $request) {
+        $controller = new WeeklyPlanController();
+        return $controller->getCurrentWeekPlan($request);
+    });
+
+    Route::get('/weekly-plans/week/{date}', function($date, Request $request) {
+        $controller = new WeeklyPlanController();
+        return $controller->getWeekPlan($date, $request);
+    });
+
+    Route::post('/weekly-plans/{id}/complete-day', function($id, Request $request) {
+        $controller = new WeeklyPlanController();
+        return $controller->completeDayWorkout($id, $request);
+    });
 
 });
 
