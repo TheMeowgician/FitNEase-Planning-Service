@@ -324,8 +324,11 @@ class WeeklyPlanController extends Controller
     {
         try {
             $authServiceUrl = env('AUTH_SERVICE_URL', 'http://fitnease-auth');
+            $internalToken = env('INTERNAL_SERVICE_TOKEN');
 
-            $response = Http::timeout(10)->get("{$authServiceUrl}/api/users/{$userId}");
+            $response = Http::timeout(10)
+                ->withHeaders(['X-Internal-Secret' => $internalToken])
+                ->get("{$authServiceUrl}/api/internal/users/{$userId}");
 
             if ($response->successful()) {
                 $user = $response->json();
