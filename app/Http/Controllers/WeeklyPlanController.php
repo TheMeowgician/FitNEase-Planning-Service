@@ -372,7 +372,8 @@ class WeeklyPlanController extends Controller
         try {
             $mlServiceUrl = env('ML_SERVICE_URL', 'http://fitnease-ml:5000');
 
-            $response = Http::timeout(30)->post("{$mlServiceUrl}/api/v1/generate-weekly-plan", [
+            // Quick timeout (2 seconds) - if ML service is slow, use fallback immediately
+            $response = Http::timeout(2)->post("{$mlServiceUrl}/api/v1/generate-weekly-plan", [
                 'user_id' => $userData['user_id'],
                 'workout_days' => $userData['preferred_workout_days'],
                 'fitness_level' => $userData['fitness_level'],
@@ -404,7 +405,7 @@ class WeeklyPlanController extends Controller
             return null;
 
         } catch (\Exception $e) {
-            Log::error('[WEEKLY_PLAN] ML service call failed', [
+            Log::info('[WEEKLY_PLAN] ML service call failed (using fast fallback)', [
                 'error' => $e->getMessage()
             ]);
 
@@ -496,7 +497,7 @@ class WeeklyPlanController extends Controller
                     'muscle_groups' => implode(',', $targetMuscleGroups),
                     'limit' => $count,
                 ],
-                'timeout' => 5,
+                'timeout' => 1, // Fast timeout - use defaults if slow
             ]);
 
             $data = json_decode($response->getBody()->getContents(), true);
