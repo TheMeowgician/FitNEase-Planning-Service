@@ -87,7 +87,7 @@ class WeeklyPlanController extends Controller
             if (!$weeklyPlanData) {
                 // Fallback to simple distribution if ML service fails
                 Log::warning('[WEEKLY_PLAN] ML service failed, using fallback');
-                $weeklyPlanData = $this->generateFallbackPlan($userData);
+                $weeklyPlanData = $this->generateFallbackPlan($userData, $request->bearerToken());
             }
 
             // Calculate week end date (Sunday)
@@ -176,13 +176,58 @@ class WeeklyPlanController extends Controller
             // Try to find current week's plan
             $plan = WeeklyWorkoutPlan::currentWeek($userId)->first();
 
-            // If no plan exists, generate one
+            // Check if we should regenerate:
+            // 1. No plan exists
+            // 2. Plan has inconsistent exercise counts (old buggy generation)
+            // 3. Force regenerate query parameter
+            $shouldRegenerate = false;
+
             if (!$plan) {
                 Log::info('[WEEKLY_PLAN] No current plan found, generating new one');
+                $shouldRegenerate = true;
+            } else {
+                // Check for inconsistent exercise counts (indicates old buggy generation)
+                $planData = $plan->plan_data ?? [];
+                $expectedExercisesPerDay = $this->getExercisesCountByFitnessLevel($plan->user_preferences_snapshot['fitness_level'] ?? 'beginner');
+                $hasInconsistentCounts = false;
 
+                foreach ($planData as $dayName => $dayData) {
+                    if (isset($dayData['planned']) && $dayData['planned'] && isset($dayData['exercises'])) {
+                        $exerciseCount = count($dayData['exercises']);
+                        if ($exerciseCount !== $expectedExercisesPerDay && $exerciseCount > 0) {
+                            $hasInconsistentCounts = true;
+                            Log::info('[WEEKLY_PLAN] Detected inconsistent exercise count', [
+                                'day' => $dayName,
+                                'count' => $exerciseCount,
+                                'expected' => $expectedExercisesPerDay
+                            ]);
+                            break;
+                        }
+                    }
+                }
+
+                if ($hasInconsistentCounts) {
+                    Log::info('[WEEKLY_PLAN] Plan has inconsistent counts, regenerating');
+                    $shouldRegenerate = true;
+                }
+
+                // Check if plan used fallback exercises (indicates Content Service fetch failed)
+                if (!$shouldRegenerate && isset($plan->generation_method) && $plan->generation_method === 'fallback') {
+                    Log::info('[WEEKLY_PLAN] Plan used fallback exercises, regenerating with real database exercises');
+                    $shouldRegenerate = true;
+                }
+
+                // Allow force regenerate via query parameter
+                if ($request->query('force_regenerate') === 'true') {
+                    Log::info('[WEEKLY_PLAN] Force regenerate requested');
+                    $shouldRegenerate = true;
+                }
+            }
+
+            if ($shouldRegenerate) {
                 return $this->generateWeeklyPlan(new Request([
                     'user_id' => $userId,
-                    'regenerate' => false
+                    'regenerate' => !is_null($plan)
                 ]));
             }
 
@@ -417,9 +462,10 @@ class WeeklyPlanController extends Controller
      * Helper: Generate fallback plan when ML service is unavailable
      *
      * @param array $userData
+     * @param string|null $token Bearer token for authentication
      * @return array
      */
-    protected function generateFallbackPlan(array $userData): array
+    protected function generateFallbackPlan(array $userData, ?string $token = null): array
     {
         $days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
         $preferredDays = $userData['preferred_workout_days'] ?? [];
@@ -430,20 +476,71 @@ class WeeklyPlanController extends Controller
         $totalDuration = 0;
         $totalCalories = 0;
 
+        // Fetch exercises ONCE for all days to get variety
+        $exercisesPerDay = $this->getExercisesCountByFitnessLevel($userData['fitness_level']);
+        $totalNeededExercises = count($preferredDays) * $exercisesPerDay;
+
+        // Fetch MANY more exercises to ensure we have enough unique ones
+        $allExercises = $this->fetchExercisesFromContent(
+            $userData['fitness_level'],
+            $userData['target_muscle_groups'] ?? ['core'],
+            $totalNeededExercises * 3, // Fetch 3x what we need for maximum variety
+            $token
+        );
+
+        // Remove duplicates based on exercise_id
+        $uniqueExercises = [];
+        $seenIds = [];
+        foreach ($allExercises as $exercise) {
+            $id = $exercise['exercise_id'];
+            if (!in_array($id, $seenIds)) {
+                $uniqueExercises[] = $exercise;
+                $seenIds[] = $id;
+            }
+        }
+
+        // Shuffle for randomness
+        shuffle($uniqueExercises);
+
+        // Create a master pool with all unique exercises + defaults for guaranteed supply
+        $masterPool = array_merge($uniqueExercises, $this->getDefaultExercises(10));
+        $poolIndex = 0; // Track position in master pool
+
         foreach ($days as $day) {
             if (in_array($day, $preferredDays)) {
-                // Workout day
-                $exercisesPerDay = $this->getExercisesCountByFitnessLevel($userData['fitness_level']);
+                // Workout day - assign exactly $exercisesPerDay exercises
                 $durationPerDay = min($timeConstraints, $exercisesPerDay * 4); // 4 min per exercise (Tabata)
 
-                // Fetch exercises from content service
-                $exercises = $this->fetchExercisesFromContent($userData['fitness_level'], $userData['target_muscle_groups'] ?? ['core'], $exercisesPerDay);
+                $dayExercises = [];
+
+                // Take exercises from master pool
+                for ($i = 0; $i < $exercisesPerDay; $i++) {
+                    if ($poolIndex < count($masterPool)) {
+                        // Use next exercise from pool
+                        $dayExercises[] = $masterPool[$poolIndex];
+                        $poolIndex++;
+                    } else {
+                        // Pool exhausted - cycle back to beginning (allow duplication)
+                        $poolIndex = 0;
+                        $dayExercises[] = $masterPool[$poolIndex];
+                        $poolIndex++;
+                    }
+                }
+
+                // Double-check: guarantee exact count
+                while (count($dayExercises) < $exercisesPerDay) {
+                    $cycleIndex = count($dayExercises) % count($masterPool);
+                    $dayExercises[] = $masterPool[$cycleIndex];
+                }
+
+                // Triple safety: trim if somehow we have too many
+                $dayExercises = array_slice($dayExercises, 0, $exercisesPerDay);
 
                 $planData[$day] = [
                     'planned' => true,
                     'rest_day' => false,
                     'workout_type' => 'tabata',
-                    'exercises' => $exercises,
+                    'exercises' => $dayExercises,
                     'estimated_duration' => $durationPerDay,
                     'estimated_calories' => $durationPerDay * 7, // Approx 7 cal/min
                     'focus_areas' => $userData['target_muscle_groups'] ?? ['full_body'],
@@ -451,7 +548,7 @@ class WeeklyPlanController extends Controller
                     'skipped' => false,
                 ];
 
-                $totalExercises += $exercisesPerDay;
+                $totalExercises += count($dayExercises);
                 $totalDuration += $durationPerDay;
                 $totalCalories += $planData[$day]['estimated_calories'];
             } else {
@@ -481,36 +578,47 @@ class WeeklyPlanController extends Controller
      * @param string $fitnessLevel
      * @param array $targetMuscleGroups
      * @param int $count
+     * @param string|null $token Bearer token for authentication
      * @return array
      */
-    protected function fetchExercisesFromContent(string $fitnessLevel, array $targetMuscleGroups, int $count): array
+    protected function fetchExercisesFromContent(string $fitnessLevel, array $targetMuscleGroups, int $count, ?string $token = null): array
     {
         try {
             $client = new \GuzzleHttp\Client();
+
+            // Use internal service token if user token not provided
+            $authToken = $token ?? env('INTERNAL_SERVICE_TOKEN');
+
             $response = $client->get(env('CONTENT_SERVICE_URL') . '/api/content/exercises', [
                 'headers' => [
                     'Accept' => 'application/json',
-                    'X-Service-Token' => env('INTERNAL_SERVICE_TOKEN'),
+                    'X-Internal-Secret' => env('INTERNAL_SERVICE_TOKEN'), // Internal service auth
                 ],
                 'query' => [
                     'difficulty' => $fitnessLevel,
                     'muscle_groups' => implode(',', $targetMuscleGroups),
                     'limit' => $count,
                 ],
-                'timeout' => 1, // Fast timeout - use defaults if slow
+                'timeout' => 10, // Allow time for database query with large dataset
             ]);
 
             $data = json_decode($response->getBody()->getContents(), true);
 
             if (!empty($data['data']) && is_array($data['data'])) {
                 return array_map(function($exercise) {
+                    $durationSeconds = 240; // 4 minutes (Tabata protocol)
+                    $caloriesPerMinute = 7; // Average calories per minute for Tabata
+                    $estimatedCalories = ($durationSeconds / 60) * $caloriesPerMinute;
+
                     return [
-                        'id' => $exercise['exercise_id'],
-                        'name' => $exercise['name'],
-                        'muscle_group' => $exercise['target_muscle_group'] ?? 'core',
-                        'difficulty' => $exercise['difficulty_level'] ?? 'beginner',
-                        'duration_seconds' => 240, // 4 minutes (Tabata protocol)
-                        'equipment' => $exercise['equipment_needed'] ?? 'none',
+                        'exercise_id' => $exercise['exercise_id'],
+                        'exercise_name' => $exercise['exercise_name'], // Fixed: was 'name', now 'exercise_name'
+                        'target_muscle_group' => $exercise['target_muscle_group'] ?? 'core',
+                        'difficulty_level' => $exercise['difficulty_level'] ?? 'beginner',
+                        'default_duration_seconds' => $durationSeconds,
+                        'estimated_calories_burned' => (int) $estimatedCalories,
+                        'equipment_needed' => $exercise['equipment_needed'] ?? 'none',
+                        'exercise_category' => $exercise['exercise_category'] ?? 'strength',
                     ];
                 }, $data['data']);
             }
@@ -534,13 +642,71 @@ class WeeklyPlanController extends Controller
      */
     protected function getDefaultExercises(int $count): array
     {
+        $caloriesPerMinute = 7; // Average calories per minute for Tabata
+        $durationSeconds = 240;
+        $estimatedCalories = (int) (($durationSeconds / 60) * $caloriesPerMinute);
+
         $defaultExercises = [
-            ['id' => 1, 'name' => 'Jumping Jacks', 'muscle_group' => 'full_body', 'difficulty' => 'beginner', 'duration_seconds' => 240, 'equipment' => 'none'],
-            ['id' => 2, 'name' => 'High Knees', 'muscle_group' => 'legs', 'difficulty' => 'beginner', 'duration_seconds' => 240, 'equipment' => 'none'],
-            ['id' => 3, 'name' => 'Mountain Climbers', 'muscle_group' => 'core', 'difficulty' => 'intermediate', 'duration_seconds' => 240, 'equipment' => 'none'],
-            ['id' => 4, 'name' => 'Burpees', 'muscle_group' => 'full_body', 'difficulty' => 'intermediate', 'duration_seconds' => 240, 'equipment' => 'none'],
-            ['id' => 5, 'name' => 'Squats', 'muscle_group' => 'legs', 'difficulty' => 'beginner', 'duration_seconds' => 240, 'equipment' => 'none'],
-            ['id' => 6, 'name' => 'Push-ups', 'muscle_group' => 'chest', 'difficulty' => 'beginner', 'duration_seconds' => 240, 'equipment' => 'none'],
+            [
+                'exercise_id' => 1,
+                'exercise_name' => 'Jumping Jacks',
+                'target_muscle_group' => 'full_body',
+                'difficulty_level' => 'beginner',
+                'default_duration_seconds' => $durationSeconds,
+                'estimated_calories_burned' => $estimatedCalories,
+                'equipment_needed' => 'none',
+                'exercise_category' => 'cardio',
+            ],
+            [
+                'exercise_id' => 2,
+                'exercise_name' => 'High Knees',
+                'target_muscle_group' => 'legs',
+                'difficulty_level' => 'beginner',
+                'default_duration_seconds' => $durationSeconds,
+                'estimated_calories_burned' => $estimatedCalories,
+                'equipment_needed' => 'none',
+                'exercise_category' => 'cardio',
+            ],
+            [
+                'exercise_id' => 3,
+                'exercise_name' => 'Mountain Climbers',
+                'target_muscle_group' => 'core',
+                'difficulty_level' => 'intermediate',
+                'default_duration_seconds' => $durationSeconds,
+                'estimated_calories_burned' => $estimatedCalories,
+                'equipment_needed' => 'none',
+                'exercise_category' => 'strength',
+            ],
+            [
+                'exercise_id' => 4,
+                'exercise_name' => 'Burpees',
+                'target_muscle_group' => 'full_body',
+                'difficulty_level' => 'intermediate',
+                'default_duration_seconds' => $durationSeconds,
+                'estimated_calories_burned' => $estimatedCalories,
+                'equipment_needed' => 'none',
+                'exercise_category' => 'cardio',
+            ],
+            [
+                'exercise_id' => 5,
+                'exercise_name' => 'Squats',
+                'target_muscle_group' => 'legs',
+                'difficulty_level' => 'beginner',
+                'default_duration_seconds' => $durationSeconds,
+                'estimated_calories_burned' => $estimatedCalories,
+                'equipment_needed' => 'none',
+                'exercise_category' => 'strength',
+            ],
+            [
+                'exercise_id' => 6,
+                'exercise_name' => 'Push-ups',
+                'target_muscle_group' => 'chest',
+                'difficulty_level' => 'beginner',
+                'default_duration_seconds' => $durationSeconds,
+                'estimated_calories_burned' => $estimatedCalories,
+                'equipment_needed' => 'none',
+                'exercise_category' => 'strength',
+            ],
         ];
 
         return array_slice($defaultExercises, 0, $count);
