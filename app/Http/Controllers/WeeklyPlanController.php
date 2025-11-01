@@ -414,48 +414,111 @@ class WeeklyPlanController extends Controller
      */
     protected function callMLPlanGeneration(array $userData): ?array
     {
-        try {
-            $mlServiceUrl = env('ML_SERVICE_URL', 'http://fitnease-ml:5000');
+        $mlServiceUrl = env('ML_SERVICE_URL', 'http://fitnease-ml:5000');
+        $maxRetries = 2;
+        $retryDelay = 1; // seconds
 
-            // Quick timeout (2 seconds) - if ML service is slow, use fallback immediately
-            $response = Http::timeout(2)->post("{$mlServiceUrl}/api/v1/generate-weekly-plan", [
-                'user_id' => $userData['user_id'],
-                'workout_days' => $userData['preferred_workout_days'],
-                'fitness_level' => $userData['fitness_level'],
-                'target_muscle_groups' => $userData['target_muscle_groups'],
-                'goals' => $userData['fitness_goals'],
-                'time_constraints' => $userData['time_constraints'],
-            ]);
+        for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+            try {
+                Log::info('[WEEKLY_PLAN] Calling ML service for weekly plan generation', [
+                    'attempt' => $attempt,
+                    'max_retries' => $maxRetries,
+                    'user_id' => $userData['user_id'],
+                    'workout_days' => $userData['preferred_workout_days'],
+                    'fitness_level' => $userData['fitness_level']
+                ]);
 
-            if ($response->successful()) {
-                $mlResponse = $response->json();
+                // Start timer to measure ML service response time
+                $startTime = microtime(true);
 
-                return [
-                    'plan_data' => $mlResponse['weekly_plan'],
-                    'total_workout_days' => count($userData['preferred_workout_days']),
-                    'total_rest_days' => 7 - count($userData['preferred_workout_days']),
-                    'total_exercises' => $mlResponse['metadata']['total_exercises'] ?? 0,
-                    'estimated_weekly_duration' => $mlResponse['metadata']['estimated_weekly_duration'] ?? 0,
-                    'estimated_weekly_calories' => $mlResponse['metadata']['estimated_weekly_calories'] ?? 0,
-                    'ml_generated' => true,
-                    'ml_confidence_score' => $mlResponse['metadata']['confidence_score'] ?? null,
-                    'generation_method' => 'ml_auto',
-                ];
+                // Increased timeout to 10 seconds to allow ML processing
+                $response = Http::timeout(10)->post("{$mlServiceUrl}/api/v1/generate-weekly-plan", [
+                    'user_id' => $userData['user_id'],
+                    'workout_days' => $userData['preferred_workout_days'],
+                    'fitness_level' => $userData['fitness_level'],
+                    'target_muscle_groups' => $userData['target_muscle_groups'],
+                    'goals' => $userData['fitness_goals'],
+                    'time_constraints' => $userData['time_constraints'],
+                ]);
+
+                $duration = (microtime(true) - $startTime) * 1000; // Convert to milliseconds
+
+                Log::info('[WEEKLY_PLAN] ML service responded', [
+                    'attempt' => $attempt,
+                    'duration_ms' => round($duration, 2),
+                    'status' => $response->status()
+                ]);
+
+                if ($response->successful()) {
+                    $mlResponse = $response->json();
+
+                    Log::info('[WEEKLY_PLAN] ✅ ML service generated plan successfully', [
+                        'duration_ms' => round($duration, 2),
+                        'total_exercises' => $mlResponse['metadata']['total_exercises'] ?? 0,
+                        'week_seed' => $mlResponse['metadata']['week_seed'] ?? null
+                    ]);
+
+                    return [
+                        'plan_data' => $mlResponse['weekly_plan'],
+                        'total_workout_days' => count($userData['preferred_workout_days']),
+                        'total_rest_days' => 7 - count($userData['preferred_workout_days']),
+                        'total_exercises' => $mlResponse['metadata']['total_exercises'] ?? 0,
+                        'estimated_weekly_duration' => $mlResponse['metadata']['estimated_weekly_duration'] ?? 0,
+                        'estimated_weekly_calories' => $mlResponse['metadata']['estimated_weekly_calories'] ?? 0,
+                        'ml_generated' => true,
+                        'ml_confidence_score' => $mlResponse['metadata']['confidence_score'] ?? null,
+                        'generation_method' => 'ml_auto',
+                    ];
+                }
+
+                Log::warning('[WEEKLY_PLAN] ML service returned non-successful status', [
+                    'attempt' => $attempt,
+                    'status' => $response->status(),
+                    'duration_ms' => round($duration, 2),
+                    'response_body' => $response->body()
+                ]);
+
+                // Don't retry on non-successful HTTP status
+                return null;
+
+            } catch (\Illuminate\Http\Client\ConnectionException $e) {
+                Log::warning('[WEEKLY_PLAN] ML service connection timeout', [
+                    'attempt' => $attempt,
+                    'max_retries' => $maxRetries,
+                    'error' => $e->getMessage()
+                ]);
+
+                // Retry on timeout/connection errors
+                if ($attempt < $maxRetries) {
+                    Log::info('[WEEKLY_PLAN] Retrying ML service call after delay', [
+                        'retry_delay_seconds' => $retryDelay
+                    ]);
+                    sleep($retryDelay);
+                    continue;
+                }
+
+                // Max retries reached
+                Log::error('[WEEKLY_PLAN] ❌ ML service failed after all retries - using fallback', [
+                    'total_attempts' => $maxRetries,
+                    'final_error' => $e->getMessage()
+                ]);
+
+                return null;
+
+            } catch (\Exception $e) {
+                Log::error('[WEEKLY_PLAN] ML service call exception', [
+                    'attempt' => $attempt,
+                    'error' => $e->getMessage(),
+                    'exception_class' => get_class($e)
+                ]);
+
+                // Don't retry on other exceptions
+                return null;
             }
-
-            Log::warning('[WEEKLY_PLAN] ML service returned non-successful status', [
-                'status' => $response->status()
-            ]);
-
-            return null;
-
-        } catch (\Exception $e) {
-            Log::info('[WEEKLY_PLAN] ML service call failed (using fast fallback)', [
-                'error' => $e->getMessage()
-            ]);
-
-            return null;
         }
+
+        // Should never reach here, but added for safety
+        return null;
     }
 
     /**
