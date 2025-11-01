@@ -451,22 +451,23 @@ class WeeklyPlanController extends Controller
 
                 if ($response->successful()) {
                     $mlResponse = $response->json();
+                    $mlData = $mlResponse['data'] ?? $mlResponse; // Handle both formats
 
                     Log::info('[WEEKLY_PLAN] ✅ ML service generated plan successfully', [
                         'duration_ms' => round($duration, 2),
-                        'total_exercises' => $mlResponse['metadata']['total_exercises'] ?? 0,
-                        'week_seed' => $mlResponse['metadata']['week_seed'] ?? null
+                        'total_exercises' => $mlData['metadata']['total_exercises'] ?? 0,
+                        'week_seed' => $mlData['metadata']['week_seed'] ?? null
                     ]);
 
                     return [
-                        'plan_data' => $mlResponse['weekly_plan'],
+                        'plan_data' => $mlData['weekly_plan'],
                         'total_workout_days' => count($userData['preferred_workout_days']),
                         'total_rest_days' => 7 - count($userData['preferred_workout_days']),
-                        'total_exercises' => $mlResponse['metadata']['total_exercises'] ?? 0,
-                        'estimated_weekly_duration' => $mlResponse['metadata']['estimated_weekly_duration'] ?? 0,
-                        'estimated_weekly_calories' => $mlResponse['metadata']['estimated_weekly_calories'] ?? 0,
+                        'total_exercises' => $mlData['metadata']['total_exercises'] ?? 0,
+                        'estimated_weekly_duration' => $mlData['metadata']['estimated_weekly_duration'] ?? 0,
+                        'estimated_weekly_calories' => $mlData['metadata']['estimated_weekly_calories'] ?? 0,
                         'ml_generated' => true,
-                        'ml_confidence_score' => $mlResponse['metadata']['confidence_score'] ?? null,
+                        'ml_confidence_score' => $mlData['metadata']['confidence_score'] ?? null,
                         'generation_method' => 'ml_auto',
                     ];
                 }
