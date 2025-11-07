@@ -803,4 +803,332 @@ class WeeklyPlanController extends Controller
         $currentWeekStart = Carbon::now()->startOfWeek();
         return $weekStartDate->equalTo($currentWeekStart);
     }
+
+    /**
+     * Adapt existing weekly plan when workout days change
+     *
+     * POST /api/plans/{id}/adapt
+     *
+     * @param int $id
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function adaptWeeklyPlan(int $id, Request $request): JsonResponse
+    {
+        try {
+            $validator = Validator::make($request->all(), [
+                'old_days' => 'required|array',
+                'new_days' => 'required|array',
+                'preserve_completed' => 'boolean',
+                'adaptation_strategy' => 'string|in:reallocate,regenerate,hybrid'
+            ]);
+
+            if ($validator->fails()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Validation failed',
+                    'errors' => $validator->errors()
+                ], 422);
+            }
+
+            $plan = WeeklyWorkoutPlan::findOrFail($id);
+            $oldDays = $request->input('old_days', []);
+            $newDays = $request->input('new_days', []);
+            $preserveCompleted = $request->input('preserve_completed', true);
+            $strategy = $request->input('adaptation_strategy', 'reallocate');
+
+            Log::info('[WEEKLY_PLAN_ADAPT] Starting adaptation', [
+                'plan_id' => $id,
+                'old_days' => $oldDays,
+                'new_days' => $newDays,
+                'strategy' => $strategy
+            ]);
+
+            // Determine removed and added days
+            $removedDays = array_diff($oldDays, $newDays);
+            $addedDays = array_diff($newDays, $oldDays);
+            $unchangedDays = array_intersect($oldDays, $newDays);
+
+            Log::info('[WEEKLY_PLAN_ADAPT] Day changes', [
+                'removed' => $removedDays,
+                'added' => $addedDays,
+                'unchanged' => $unchangedDays
+            ]);
+
+            // Execute adaptation strategy
+            $updatedPlanData = $this->executeAdaptationStrategy(
+                $plan,
+                $removedDays,
+                $addedDays,
+                $unchangedDays,
+                $strategy,
+                $preserveCompleted
+            );
+
+            // Update the plan
+            $plan->plan_data = $updatedPlanData;
+            $plan->user_preferences_snapshot = array_merge(
+                $plan->user_preferences_snapshot ?? [],
+                ['preferred_workout_days' => $newDays]
+            );
+
+            // Recalculate totals
+            $totalWorkoutDays = count($newDays);
+            $totalRestDays = 7 - $totalWorkoutDays;
+            $totalExercises = 0;
+            $totalDuration = 0;
+            $totalCalories = 0;
+
+            foreach ($updatedPlanData as $dayData) {
+                if ($dayData['planned'] ?? false) {
+                    $totalExercises += count($dayData['exercises'] ?? []);
+                    $totalDuration += $dayData['estimated_duration'] ?? 0;
+                    $totalCalories += $dayData['estimated_calories'] ?? 0;
+                }
+            }
+
+            $plan->total_workout_days = $totalWorkoutDays;
+            $plan->total_rest_days = $totalRestDays;
+            $plan->total_exercises = $totalExercises;
+            $plan->estimated_weekly_duration = $totalDuration;
+            $plan->estimated_weekly_calories = $totalCalories;
+            $plan->save();
+
+            Log::info('[WEEKLY_PLAN_ADAPT] Adaptation completed successfully', [
+                'plan_id' => $id,
+                'new_total_exercises' => $totalExercises
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Weekly plan adapted successfully',
+                'data' => $plan->fresh()
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('[WEEKLY_PLAN_ADAPT] Adaptation failed', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to adapt weekly plan',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Execute adaptation strategy
+     *
+     * @param WeeklyWorkoutPlan $plan
+     * @param array $removedDays
+     * @param array $addedDays
+     * @param array $unchangedDays
+     * @param string $strategy
+     * @param bool $preserveCompleted
+     * @return array
+     */
+    protected function executeAdaptationStrategy(
+        WeeklyWorkoutPlan $plan,
+        array $removedDays,
+        array $addedDays,
+        array $unchangedDays,
+        string $strategy,
+        bool $preserveCompleted
+    ): array {
+        $planData = $plan->plan_data;
+        $currentDayOfWeek = strtolower(Carbon::now()->format('l'));
+
+        Log::info('[WEEKLY_PLAN_ADAPT] Executing strategy', [
+            'strategy' => $strategy,
+            'current_day' => $currentDayOfWeek
+        ]);
+
+        switch ($strategy) {
+            case 'reallocate':
+                return $this->reallocateExercises(
+                    $plan,
+                    $planData,
+                    $removedDays,
+                    $addedDays,
+                    $unchangedDays,
+                    $currentDayOfWeek,
+                    $preserveCompleted
+                );
+
+            case 'regenerate':
+                // For regenerate, call ML service to generate completely new plan
+                // (This is handled by the existing generateWeeklyPlan method)
+                return $planData; // Placeholder - actual regeneration done separately
+
+            case 'hybrid':
+            default:
+                return $this->reallocateExercises(
+                    $plan,
+                    $planData,
+                    $removedDays,
+                    $addedDays,
+                    $unchangedDays,
+                    $currentDayOfWeek,
+                    $preserveCompleted
+                );
+        }
+    }
+
+    /**
+     * Reallocate exercises from removed days to new days
+     *
+     * @param WeeklyWorkoutPlan $plan
+     * @param array $planData
+     * @param array $removedDays
+     * @param array $addedDays
+     * @param array $unchangedDays
+     * @param string $currentDayOfWeek
+     * @param bool $preserveCompleted
+     * @return array
+     */
+    protected function reallocateExercises(
+        WeeklyWorkoutPlan $plan,
+        array $planData,
+        array $removedDays,
+        array $addedDays,
+        array $unchangedDays,
+        string $currentDayOfWeek,
+        bool $preserveCompleted
+    ): array {
+        $orphanedExercises = [];
+
+        // Step 1: Collect exercises from removed days
+        foreach ($removedDays as $day) {
+            $dayData = $planData[$day] ?? null;
+
+            if (!$dayData) continue;
+
+            $isCompleted = $dayData['completed'] ?? false;
+            $isFutureDay = $this->isFutureDay($day, $currentDayOfWeek);
+
+            Log::info('[WEEKLY_PLAN_ADAPT] Processing removed day', [
+                'day' => $day,
+                'completed' => $isCompleted,
+                'is_future' => $isFutureDay
+            ]);
+
+            // Only reallocate if day is in future and not completed
+            if ($isFutureDay && !$isCompleted && !empty($dayData['exercises'])) {
+                $orphanedExercises = array_merge($orphanedExercises, $dayData['exercises']);
+                Log::info('[WEEKLY_PLAN_ADAPT] Collected exercises from removed day', [
+                    'day' => $day,
+                    'count' => count($dayData['exercises'])
+                ]);
+            }
+
+            // Mark removed day as rest day (unless completed and preserving)
+            if (!($preserveCompleted && $isCompleted)) {
+                $planData[$day] = [
+                    'planned' => false,
+                    'rest_day' => true
+                ];
+            }
+        }
+
+        Log::info('[WEEKLY_PLAN_ADAPT] Total orphaned exercises', [
+            'count' => count($orphanedExercises)
+        ]);
+
+        // Step 2: Distribute orphaned exercises to new days
+        $exercisesPerDay = $this->getExercisesCountByFitnessLevel(
+            $plan->user_preferences_snapshot['fitness_level'] ?? 'beginner'
+        );
+
+        $orphanIndex = 0;
+        foreach ($addedDays as $day) {
+            $dayExercises = [];
+
+            // Take exercises from orphaned pool first
+            while ($orphanIndex < count($orphanedExercises) && count($dayExercises) < $exercisesPerDay) {
+                $dayExercises[] = $orphanedExercises[$orphanIndex];
+                $orphanIndex++;
+            }
+
+            // If not enough orphaned exercises, generate new ones
+            if (count($dayExercises) < $exercisesPerDay) {
+                $needed = $exercisesPerDay - count($dayExercises);
+                Log::info('[WEEKLY_PLAN_ADAPT] Generating additional exercises', [
+                    'day' => $day,
+                    'needed' => $needed
+                ]);
+
+                $newExercises = $this->generateExercisesForDay($plan, $needed);
+                $dayExercises = array_merge($dayExercises, $newExercises);
+            }
+
+            // Calculate metrics
+            $duration = count($dayExercises) * 4; // Tabata: 4 min per exercise
+            $calories = array_sum(array_column($dayExercises, 'estimated_calories_burned'));
+
+            // Create new day plan
+            $planData[$day] = [
+                'planned' => true,
+                'rest_day' => false,
+                'exercises' => $dayExercises,
+                'estimated_duration' => $duration,
+                'estimated_calories' => $calories,
+                'focus_areas' => array_unique(array_column($dayExercises, 'target_muscle_group')),
+                'completed' => false,
+                'skipped' => false,
+                'adapted_from_reallocation' => true
+            ];
+
+            Log::info('[WEEKLY_PLAN_ADAPT] Created plan for added day', [
+                'day' => $day,
+                'exercises' => count($dayExercises),
+                'from_orphaned' => $orphanIndex,
+                'newly_generated' => $needed ?? 0
+            ]);
+        }
+
+        return $planData;
+    }
+
+    /**
+     * Check if a day is in the future relative to current day
+     *
+     * @param string $day
+     * @param string $currentDayOfWeek
+     * @return bool
+     */
+    protected function isFutureDay(string $day, string $currentDayOfWeek): bool
+    {
+        $daysOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+        $currentIndex = array_search(strtolower($currentDayOfWeek), $daysOfWeek);
+        $targetIndex = array_search(strtolower($day), $daysOfWeek);
+
+        return $targetIndex > $currentIndex;
+    }
+
+    /**
+     * Generate exercises for a specific day
+     *
+     * @param WeeklyWorkoutPlan $plan
+     * @param int $count
+     * @return array
+     */
+    protected function generateExercisesForDay(WeeklyWorkoutPlan $plan, int $count): array
+    {
+        $userData = $plan->user_preferences_snapshot ?? [];
+        $fitnessLevel = $userData['fitness_level'] ?? 'beginner';
+        $targetMuscleGroups = $userData['target_muscle_groups'] ?? ['core'];
+
+        // Fetch exercises from Content Service
+        $exercises = $this->fetchExercisesFromContent(
+            $fitnessLevel,
+            $targetMuscleGroups,
+            $count,
+            null
+        );
+
+        return array_slice($exercises, 0, $count);
+    }
 }

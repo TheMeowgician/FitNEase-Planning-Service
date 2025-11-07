@@ -87,6 +87,11 @@ Route::prefix('planning')->middleware('auth.api')->group(function () {
         return $controller->completeDayWorkout($id, $request);
     });
 
+    Route::post('/weekly-plans/{id}/adapt', function($id, Request $request) {
+        $controller = new WeeklyPlanController();
+        return $controller->adaptWeeklyPlan($id, $request);
+    });
+
 });
 
 // Service Communication Testing Routes (Protected)
