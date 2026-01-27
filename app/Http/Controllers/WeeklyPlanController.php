@@ -217,6 +217,23 @@ class WeeklyPlanController extends Controller
                     $shouldRegenerate = true;
                 }
 
+                // Check if user's fitness level has changed since plan was generated
+                // This ensures exercises match the user's CURRENT fitness level, not the old one
+                if (!$shouldRegenerate) {
+                    $currentUserData = $this->getUserData((int) $userId);
+                    $planFitnessLevel = $plan->user_preferences_snapshot['fitness_level'] ?? 'beginner';
+                    $currentFitnessLevel = $currentUserData['fitness_level'] ?? 'beginner';
+
+                    if ($currentFitnessLevel !== $planFitnessLevel) {
+                        Log::info('[WEEKLY_PLAN] Fitness level changed, regenerating plan', [
+                            'old_level' => $planFitnessLevel,
+                            'new_level' => $currentFitnessLevel,
+                            'user_id' => $userId
+                        ]);
+                        $shouldRegenerate = true;
+                    }
+                }
+
                 // Allow force regenerate via query parameter
                 if ($request->query('force_regenerate') === 'true') {
                     Log::info('[WEEKLY_PLAN] Force regenerate requested');
@@ -363,6 +380,9 @@ class WeeklyPlanController extends Controller
     /**
      * Helper: Fetch user data from auth service
      *
+     * Uses fitness_level from the latest initial_onboarding assessment (same as Dashboard).
+     * This ensures consistent fitness level across the system.
+     *
      * @param int $userId
      * @return array|null
      */
@@ -372,6 +392,7 @@ class WeeklyPlanController extends Controller
             $authServiceUrl = env('AUTH_SERVICE_URL', 'http://fitnease-auth');
             $internalToken = env('INTERNAL_SERVICE_TOKEN');
 
+            // Fetch user profile with fitness assessments
             $response = Http::timeout(10)
                 ->withHeaders(['X-Internal-Secret' => $internalToken])
                 ->get("{$authServiceUrl}/api/internal/users/{$userId}");
@@ -379,9 +400,30 @@ class WeeklyPlanController extends Controller
             if ($response->successful()) {
                 $user = $response->json();
 
+                // Get fitness level from the latest initial_onboarding assessment
+                // This matches how the Dashboard determines fitness level
+                $fitnessLevel = $user['fitness_level'] ?? 'beginner';
+                // Handle both snake_case and camelCase (Laravel serialization varies)
+                $fitnessAssessments = $user['fitness_assessments'] ?? $user['fitnessAssessments'] ?? [];
+
+                // Look for initial_onboarding assessment with fitness_level
+                foreach ($fitnessAssessments as $assessment) {
+                    if (($assessment['assessment_type'] ?? '') === 'initial_onboarding') {
+                        $assessmentData = $assessment['assessment_data'] ?? [];
+                        if (isset($assessmentData['fitness_level'])) {
+                            $fitnessLevel = $assessmentData['fitness_level'];
+                            Log::info('[WEEKLY_PLAN] Using fitness_level from initial_onboarding assessment', [
+                                'user_id' => $userId,
+                                'fitness_level' => $fitnessLevel
+                            ]);
+                            break;
+                        }
+                    }
+                }
+
                 return [
                     'user_id' => $userId,
-                    'fitness_level' => $user['fitness_level'] ?? 'beginner',
+                    'fitness_level' => $fitnessLevel,
                     'preferred_workout_days' => $user['preferred_workout_days'] ?? [],
                     'target_muscle_groups' => $user['target_muscle_groups'] ?? [],
                     'fitness_goals' => $user['fitness_goals'] ?? [],
