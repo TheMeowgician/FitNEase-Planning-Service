@@ -242,10 +242,36 @@ class WeeklyPlanController extends Controller
             }
 
             if ($shouldRegenerate) {
-                return $this->generateWeeklyPlan(new Request([
+                // Regenerate the plan
+                $regenerateResponse = $this->generateWeeklyPlan(new Request([
                     'user_id' => $userId,
                     'regenerate' => !is_null($plan)
                 ]));
+
+                // If regeneration failed, return the error response
+                $regenerateData = json_decode($regenerateResponse->getContent(), true);
+                if (!($regenerateData['success'] ?? false)) {
+                    return $regenerateResponse;
+                }
+
+                // Fetch the newly generated plan to return in correct format
+                $plan = WeeklyWorkoutPlan::currentWeek($userId)->first();
+                if (!$plan) {
+                    return $regenerateResponse; // Fallback to original response if fetch fails
+                }
+
+                // Return in the same format as normal getCurrentWeekPlan response
+                $todayPlan = $plan->getTodayPlan();
+
+                return response()->json([
+                    'success' => true,
+                    'data' => [
+                        'plan' => $plan,
+                        'today' => $todayPlan,
+                        'today_day_name' => strtolower(Carbon::now()->format('l'))
+                    ],
+                    'regenerated' => true
+                ]);
             }
 
             // Add today's plan to response
