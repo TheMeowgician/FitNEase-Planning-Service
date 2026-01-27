@@ -217,6 +217,42 @@ class WeeklyPlanController extends Controller
                     $shouldRegenerate = true;
                 }
 
+                // Check if exercises match the user's fitness level (fixes old bug where all exercises were difficulty 2)
+                // - Beginner users should have difficulty 1 exercises
+                // - Advanced users should have difficulty 3 exercises
+                // - Intermediate users are OK with difficulty 2
+                if (!$shouldRegenerate) {
+                    $planFitnessLevel = $plan->user_preferences_snapshot['fitness_level'] ?? 'beginner';
+                    $expectedDifficulty = match($planFitnessLevel) {
+                        'beginner' => 1,
+                        'advanced' => 3,
+                        default => 2
+                    };
+
+                    // Only check beginner and advanced - intermediate is fine with difficulty 2
+                    if ($planFitnessLevel === 'beginner' || $planFitnessLevel === 'advanced') {
+                        $hasCorrectDifficulty = false;
+                        foreach ($planData as $dayName => $dayData) {
+                            if (isset($dayData['exercises']) && is_array($dayData['exercises'])) {
+                                foreach ($dayData['exercises'] as $exercise) {
+                                    if (isset($exercise['difficulty_level']) && $exercise['difficulty_level'] == $expectedDifficulty) {
+                                        $hasCorrectDifficulty = true;
+                                        break 2;
+                                    }
+                                }
+                            }
+                        }
+                        if (!$hasCorrectDifficulty) {
+                            Log::info('[WEEKLY_PLAN] User fitness level mismatch detected, regenerating', [
+                                'fitness_level' => $planFitnessLevel,
+                                'expected_difficulty' => $expectedDifficulty,
+                                'reason' => 'difficulty mapping fix'
+                            ]);
+                            $shouldRegenerate = true;
+                        }
+                    }
+                }
+
                 // Check if user's fitness level has changed since plan was generated
                 // This ensures exercises match the user's CURRENT fitness level, not the old one
                 if (!$shouldRegenerate) {
