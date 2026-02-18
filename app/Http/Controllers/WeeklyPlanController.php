@@ -90,50 +90,39 @@ class WeeklyPlanController extends Controller
                 $weeklyPlanData = $this->generateFallbackPlan($userData, $request->bearerToken());
             }
 
-            // Preserve exercise data for already-completed days so mid-week tier changes
-            // don't overwrite what the user actually did.
-            // We query the tracking service directly so this works regardless of which
-            // page triggered regeneration (workouts page never sends completed_dates).
-            $preservedDayData = [];
-            if ($existingPlan) {
-                // Primary: query tracking service internally
-                $completedDates = $this->getCompletedDaysThisWeek(
+            // Trim exercises for already-completed days to the count the user actually did.
+            // We use tracking service session data as the source of truth because:
+            //   - The existing plan may have already been overwritten with the new tier count
+            //   - The client doesn't always send completed_dates (workouts page)
+            //
+            // completedSessionCounts is passed from getCurrentWeekPlan when available
+            // (avoids a double tracking service call). Otherwise we query directly.
+            $completedSessionCounts = [];
+            $countsJson = $request->input('completed_session_counts');
+            if ($countsJson) {
+                $completedSessionCounts = json_decode($countsJson, true) ?? [];
+            }
+
+            if (empty($completedSessionCounts) && $existingPlan) {
+                $completedSessionCounts = $this->getCompletedSessionCounts(
                     (int) $userId,
                     $weekStartDate,
                     $weekStartDate->copy()->endOfWeek()
                 );
-
-                // Fallback: use client-sent completed_dates if tracking service returned nothing
-                if (empty($completedDates)) {
-                    $completedDatesStr = $request->input('completed_dates', '');
-                    if ($completedDatesStr) {
-                        $completedDates = array_filter(array_map('trim', explode(',', $completedDatesStr)));
-                    }
-                }
-
-                if (!empty($completedDates)) {
-                    $existingPlanData = $existingPlan->plan_data ?? [];
-                    foreach ($completedDates as $dateStr) {
-                        try {
-                            $dayName = strtolower(Carbon::parse($dateStr)->format('l'));
-                            if (isset($existingPlanData[$dayName])) {
-                                $preservedDayData[$dayName] = $existingPlanData[$dayName];
-                            }
-                        } catch (\Exception $e) {
-                            // Skip invalid date strings
-                        }
-                    }
-                }
             }
 
-            // Restore preserved exercises into new plan data
-            if (!empty($preservedDayData)) {
-                foreach ($preservedDayData as $dayName => $dayData) {
-                    $weeklyPlanData['plan_data'][$dayName] = $dayData;
+            foreach ($completedSessionCounts as $dayName => $actualCount) {
+                if ($actualCount > 0 && isset($weeklyPlanData['plan_data'][$dayName]['exercises'])) {
+                    $weeklyPlanData['plan_data'][$dayName]['exercises'] = array_slice(
+                        $weeklyPlanData['plan_data'][$dayName]['exercises'],
+                        0,
+                        $actualCount
+                    );
+                    Log::info('[WEEKLY_PLAN] Trimmed exercises for completed day', [
+                        'day' => $dayName,
+                        'trimmed_to' => $actualCount,
+                    ]);
                 }
-                Log::info('[WEEKLY_PLAN] Preserved exercise data for completed days', [
-                    'days' => array_keys($preservedDayData),
-                ]);
             }
 
             // Calculate week end date (Sunday)
@@ -341,12 +330,45 @@ class WeeklyPlanController extends Controller
                 }
             }
 
+            // Check if any completed day's exercise count in the plan doesn't match
+            // what the user actually did (e.g. plan was regenerated without preservation).
+            // We query tracking service once here and pass the counts to generateWeeklyPlan
+            // so it doesn't need to make a second call.
+            $completedSessionCounts = [];
+            if ($plan && !$shouldRegenerate) {
+                $weekStart = Carbon::now()->startOfWeek();
+                $weekEnd = Carbon::now()->endOfWeek();
+                $completedSessionCounts = $this->getCompletedSessionCounts(
+                    (int) $userId,
+                    $weekStart,
+                    $weekEnd
+                );
+                foreach ($completedSessionCounts as $dayName => $actualCount) {
+                    $planDayData = ($plan->plan_data ?? [])[$dayName] ?? [];
+                    if (!($planDayData['planned'] ?? false)) {
+                        continue;
+                    }
+                    $planCount = count($planDayData['exercises'] ?? []);
+                    if ($actualCount > 0 && $planCount !== $actualCount) {
+                        Log::info('[WEEKLY_PLAN] Completed day exercise count mismatch, fixing', [
+                            'day' => $dayName,
+                            'plan_count' => $planCount,
+                            'actual_count' => $actualCount,
+                        ]);
+                        $shouldRegenerate = true;
+                        break;
+                    }
+                }
+            }
+
             if ($shouldRegenerate) {
-                // Regenerate the plan, forwarding completed_dates so already-done days keep their exercises
                 $regenerateResponse = $this->generateWeeklyPlan(new Request([
                     'user_id' => $userId,
                     'regenerate' => !is_null($plan),
-                    'completed_dates' => $request->query('completed_dates', ''),
+                    // Pass counts so generateWeeklyPlan doesn't need a second tracking call
+                    'completed_session_counts' => !empty($completedSessionCounts)
+                        ? json_encode($completedSessionCounts)
+                        : null,
                 ]));
 
                 // If regeneration failed, return the error response
@@ -962,18 +984,21 @@ class WeeklyPlanController extends Controller
      * @return array [min, max]
      */
     /**
-     * Helper: Query tracking service to find which dates this week the user
-     * has already completed an individual workout session.
+     * Helper: Query tracking service for completed individual sessions this week.
      *
-     * Called from generateWeeklyPlan so preservation works regardless of which
-     * client page triggered the regeneration.
+     * Returns ['day_name' => exercise_count] so callers can trim new plan exercises
+     * to match what was actually done — the source of truth is the tracking session's
+     * user_exercise_history count (one record per exercise performed).
+     *
+     * Falls back to actual_duration_minutes / 4 (Tabata: 4 min per exercise) if
+     * user_exercise_history records were not created.
      *
      * @param int $userId
      * @param Carbon $weekStart
      * @param Carbon $weekEnd
-     * @return array Date strings in 'Y-m-d' format
+     * @return array ['day_name' => exercise_count]
      */
-    protected function getCompletedDaysThisWeek(int $userId, Carbon $weekStart, Carbon $weekEnd): array
+    protected function getCompletedSessionCounts(int $userId, Carbon $weekStart, Carbon $weekEnd): array
     {
         try {
             $trackingUrl = env('TRACKING_SERVICE_URL', 'http://fitnease-tracking');
@@ -987,7 +1012,7 @@ class WeeklyPlanController extends Controller
                 ]);
 
             if (!$response->successful()) {
-                Log::warning('[WEEKLY_PLAN] Tracking service returned non-success when fetching completed days', [
+                Log::warning('[WEEKLY_PLAN] Tracking service non-success fetching session counts', [
                     'user_id' => $userId,
                     'status' => $response->status(),
                 ]);
@@ -999,7 +1024,7 @@ class WeeklyPlanController extends Controller
             $sessions = $data['data']['data'] ?? [];
 
             $weekEnd->setTime(23, 59, 59);
-            $completedDates = [];
+            $counts = []; // ['day_name' => max_exercise_count_for_day]
 
             foreach ($sessions as $session) {
                 if (($session['session_type'] ?? '') !== 'individual') {
@@ -1011,25 +1036,41 @@ class WeeklyPlanController extends Controller
 
                 try {
                     $sessionDate = Carbon::parse($session['created_at']);
-                    if ($sessionDate->between($weekStart, $weekEnd)) {
-                        $completedDates[] = $sessionDate->format('Y-m-d');
+                    if (!$sessionDate->between($weekStart, $weekEnd)) {
+                        continue;
+                    }
+
+                    $dayName = strtolower($sessionDate->format('l'));
+
+                    // Primary: count user_exercise_history records (one per exercise done)
+                    $exerciseCount = count($session['user_exercise_history'] ?? []);
+
+                    // Fallback: infer from duration (Tabata = 4 min per exercise)
+                    if ($exerciseCount === 0) {
+                        $durationMin = $session['actual_duration_minutes'] ?? 0;
+                        if ($durationMin > 0) {
+                            $exerciseCount = (int) round($durationMin / 4);
+                        }
+                    }
+
+                    if ($exerciseCount > 0) {
+                        // Keep the highest count if multiple sessions exist on the same day
+                        $counts[$dayName] = max($counts[$dayName] ?? 0, $exerciseCount);
                     }
                 } catch (\Exception $e) {
                     // Skip sessions with unparseable dates
                 }
             }
 
-            $unique = array_values(array_unique($completedDates));
-
-            Log::info('[WEEKLY_PLAN] Fetched completed days this week from tracking service', [
+            Log::info('[WEEKLY_PLAN] Completed session exercise counts this week', [
                 'user_id' => $userId,
-                'completed_dates' => $unique,
+                'counts' => $counts,
             ]);
 
-            return $unique;
+            return $counts;
 
         } catch (\Exception $e) {
-            Log::warning('[WEEKLY_PLAN] Exception querying tracking service for completed days', [
+            Log::warning('[WEEKLY_PLAN] Exception querying tracking service for session counts', [
                 'user_id' => $userId,
                 'error' => $e->getMessage(),
             ]);
