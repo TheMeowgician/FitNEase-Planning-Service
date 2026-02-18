@@ -362,6 +362,33 @@ class WeeklyPlanController extends Controller
                         break;
                     }
                 }
+
+                // Check 3: Uncompleted days with wrong exercise count for current tier.
+                // Handles case where plan was generated at a lower tier and user has since advanced.
+                if (!$shouldRegenerate && $clientSessionCount >= 0) {
+                    $currentTierCount = $this->getExercisesCountByFitnessLevel($fitnessLevel)
+                        + ($this->getSessionTier($clientSessionCount) - 1);
+                    $completedDayNames = array_keys($completedDayCounts);
+                    foreach ($plan->plan_data ?? [] as $dayName => $dayData) {
+                        if (!($dayData['planned'] ?? false)) {
+                            continue; // Rest day
+                        }
+                        if (in_array($dayName, $completedDayNames)) {
+                            continue; // Already handled by Check 2
+                        }
+                        $planCount = count($dayData['exercises'] ?? []);
+                        if ($planCount > 0 && $planCount !== $currentTierCount) {
+                            Log::info('[WEEKLY_PLAN] Uncompleted day has wrong exercise count for tier', [
+                                'day' => $dayName,
+                                'plan_count' => $planCount,
+                                'expected' => $currentTierCount,
+                                'session_count' => $clientSessionCount,
+                            ]);
+                            $shouldRegenerate = true;
+                            break;
+                        }
+                    }
+                }
             }
 
             if ($shouldRegenerate) {
