@@ -98,20 +98,42 @@ class WeeklyPlanController extends Controller
             // Counts are passed from getCurrentWeekPlan to avoid a second tracking call.
             // If called directly (e.g. manual "Regenerate"), we query the service here.
             $completedDayCounts = [];
+            $preWeekCount = -1;
+
             $countsJson = $request->input('completed_session_counts');
             if ($countsJson) {
                 $completedDayCounts = json_decode($countsJson, true) ?? [];
             }
 
-            if (empty($completedDayCounts) && $existingPlan) {
-                $completedDayCounts = $this->getCompletedDayTierCounts(
+            $preWeekCountInput = $request->input('pre_week_session_count');
+            if ($preWeekCountInput !== null) {
+                $preWeekCount = (int) $preWeekCountInput;
+            }
+
+            if ((empty($completedDayCounts) && $existingPlan) || $preWeekCount < 0) {
+                $analysis = $this->getSessionAnalysis(
                     (int) $userId,
                     $weekStartDate,
                     $weekStartDate->copy()->endOfWeek(),
                     $userData['fitness_level'] ?? 'beginner'
                 );
+                if (empty($completedDayCounts)) {
+                    $completedDayCounts = $analysis['completed_day_counts'];
+                }
+                if ($preWeekCount < 0) {
+                    $preWeekCount = $analysis['pre_week_count'];
+                }
             }
 
+            $base = $this->getExercisesCountByFitnessLevel($userData['fitness_level'] ?? 'beginner');
+            $pastMissedTierCount = $base + ($this->getSessionTier(max(0, $preWeekCount)) - 1);
+
+            $daysOfWeek = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+            $today = strtolower(Carbon::now()->format('l'));
+            $todayIndex = array_search($today, $daysOfWeek);
+            $completedDayNames = array_keys($completedDayCounts);
+
+            // Trim completed days to their actual tier count at completion time
             foreach ($completedDayCounts as $dayName => $expectedCount) {
                 if ($expectedCount > 0 && isset($weeklyPlanData['plan_data'][$dayName]['exercises'])) {
                     $weeklyPlanData['plan_data'][$dayName]['exercises'] = array_slice(
@@ -125,6 +147,22 @@ class WeeklyPlanController extends Controller
                     ]);
                 }
             }
+
+            // Trim past missed days to pre-week tier count (not current tier)
+            foreach ($weeklyPlanData['plan_data'] as $dayName => &$dayData) {
+                if (!($dayData['planned'] ?? false)) continue;
+                if (in_array($dayName, $completedDayNames)) continue;
+                $dayIndex = array_search(strtolower($dayName), $daysOfWeek);
+                if ($dayIndex === false || $dayIndex >= $todayIndex) continue;
+                if (!isset($dayData['exercises'])) continue;
+                $dayData['exercises'] = array_slice($dayData['exercises'], 0, $pastMissedTierCount);
+                Log::info('[WEEKLY_PLAN] Trimmed past missed day to pre-week tier', [
+                    'day' => $dayName,
+                    'trimmed_to' => $pastMissedTierCount,
+                    'pre_week_count' => $preWeekCount,
+                ]);
+            }
+            unset($dayData);
 
             // Calculate week end date (Sunday)
             $weekEndDate = $weekStartDate->copy()->endOfWeek();
@@ -336,16 +374,21 @@ class WeeklyPlanController extends Controller
             // Querying here lets us pass the result to generateWeeklyPlan so it
             // doesn't need a second tracking service call.
             $completedDayCounts = [];
+            $preWeekCount = 0;
             if ($plan && !$shouldRegenerate) {
                 $fitnessLevel = $plan->user_preferences_snapshot['fitness_level'] ?? 'beginner';
                 $weekStart = Carbon::now()->startOfWeek();
                 $weekEnd = Carbon::now()->endOfWeek();
-                $completedDayCounts = $this->getCompletedDayTierCounts(
+                $analysis = $this->getSessionAnalysis(
                     (int) $userId,
                     $weekStart,
                     $weekEnd,
                     $fitnessLevel
                 );
+                $completedDayCounts = $analysis['completed_day_counts'];
+                $preWeekCount = $analysis['pre_week_count'];
+
+                // Check 2: Completed days with wrong exercise count
                 foreach ($completedDayCounts as $dayName => $expectedCount) {
                     $planDayData = ($plan->plan_data ?? [])[$dayName] ?? [];
                     if (!($planDayData['planned'] ?? false)) {
@@ -363,25 +406,29 @@ class WeeklyPlanController extends Controller
                     }
                 }
 
-                // Check 3: Uncompleted days with wrong exercise count for current tier.
-                // Handles case where plan was generated at a lower tier and user has since advanced.
+                // Check 3: Uncompleted days with wrong exercise count for their expected tier.
+                // Past missed days use pre-week tier; future/today days use current tier.
                 if (!$shouldRegenerate && $clientSessionCount >= 0) {
-                    $currentTierCount = $this->getExercisesCountByFitnessLevel($fitnessLevel)
-                        + ($this->getSessionTier($clientSessionCount) - 1);
+                    $base = $this->getExercisesCountByFitnessLevel($fitnessLevel);
+                    $currentTierCount = $base + ($this->getSessionTier($clientSessionCount) - 1);
+                    $preWeekTierCount = $base + ($this->getSessionTier($preWeekCount) - 1);
                     $completedDayNames = array_keys($completedDayCounts);
+                    $daysOfWeek = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+                    $todayName = strtolower(Carbon::now()->format('l'));
+                    $todayIdx = array_search($todayName, $daysOfWeek);
                     foreach ($plan->plan_data ?? [] as $dayName => $dayData) {
-                        if (!($dayData['planned'] ?? false)) {
-                            continue; // Rest day
-                        }
-                        if (in_array($dayName, $completedDayNames)) {
-                            continue; // Already handled by Check 2
-                        }
+                        if (!($dayData['planned'] ?? false)) continue;
+                        if (in_array($dayName, $completedDayNames)) continue;
+                        $dayIdx = array_search(strtolower($dayName), $daysOfWeek);
+                        $isPast = $dayIdx !== false && $dayIdx < $todayIdx;
+                        $expectedCount = $isPast ? $preWeekTierCount : $currentTierCount;
                         $planCount = count($dayData['exercises'] ?? []);
-                        if ($planCount > 0 && $planCount !== $currentTierCount) {
+                        if ($planCount > 0 && $planCount !== $expectedCount) {
                             Log::info('[WEEKLY_PLAN] Uncompleted day has wrong exercise count for tier', [
                                 'day' => $dayName,
                                 'plan_count' => $planCount,
-                                'expected' => $currentTierCount,
+                                'expected' => $expectedCount,
+                                'is_past' => $isPast,
                                 'session_count' => $clientSessionCount,
                             ]);
                             $shouldRegenerate = true;
@@ -395,10 +442,10 @@ class WeeklyPlanController extends Controller
                 $regenerateResponse = $this->generateWeeklyPlan(new Request([
                     'user_id' => $userId,
                     'regenerate' => !is_null($plan),
-                    // Pass counts so generateWeeklyPlan doesn't need a second tracking call
                     'completed_session_counts' => !empty($completedDayCounts)
                         ? json_encode($completedDayCounts)
                         : null,
+                    'pre_week_session_count' => $preWeekCount,
                 ]));
 
                 // If regeneration failed, return the error response
@@ -1118,6 +1165,81 @@ class WeeklyPlanController extends Controller
                 'error'   => $e->getMessage(),
             ]);
             return [];
+        }
+    }
+
+    /**
+     * Helper: Fetch all individual completed sessions and return:
+     *   - completed_day_counts: per-day exercise count based on tier at completion time
+     *   - pre_week_count: number of individual sessions completed before $weekStart
+     *
+     * This replaces getCompletedDayTierCounts while also providing pre-week count
+     * (needed to correctly trim past missed days during plan regeneration).
+     */
+    protected function getSessionAnalysis(
+        int $userId,
+        Carbon $weekStart,
+        Carbon $weekEnd,
+        string $fitnessLevel
+    ): array {
+        try {
+            $trackingUrl   = env('TRACKING_SERVICE_URL', 'http://fitnease-tracking');
+            $internalToken = env('INTERNAL_SERVICE_TOKEN');
+
+            $response = Http::timeout(5)
+                ->withHeaders(['X-Internal-Secret' => $internalToken])
+                ->get("{$trackingUrl}/api/ml-internal/user-sessions/{$userId}", [
+                    'per_page' => 500,
+                ]);
+
+            if (!$response->successful()) {
+                return ['completed_day_counts' => [], 'pre_week_count' => 0];
+            }
+
+            $data     = $response->json();
+            $sessions = $data['data']['data'] ?? [];
+
+            $individual = array_filter($sessions, static function ($s) {
+                return ($s['session_type'] ?? '') === 'individual'
+                    && ($s['is_completed'] ?? false);
+            });
+            usort($individual, static function ($a, $b) {
+                return strtotime($a['created_at']) - strtotime($b['created_at']);
+            });
+
+            $weekEnd->setTime(23, 59, 59);
+            $base               = $this->getExercisesCountByFitnessLevel($fitnessLevel);
+            $completedDayCounts = [];
+            $preWeekCount       = 0;
+            $cumulative         = 0;
+
+            foreach ($individual as $session) {
+                $cumulative++;
+                try {
+                    $sessionDate = Carbon::parse($session['created_at']);
+                    if ($sessionDate->lt($weekStart)) {
+                        $preWeekCount = $cumulative;
+                        continue;
+                    }
+                    if (!$sessionDate->between($weekStart, $weekEnd)) {
+                        continue;
+                    }
+                    $dayName = strtolower($sessionDate->format('l'));
+                    if (!isset($completedDayCounts[$dayName])) {
+                        $tierAtTime = $this->getSessionTier($cumulative);
+                        $completedDayCounts[$dayName] = $base + ($tierAtTime - 1);
+                    }
+                } catch (\Exception $e) {}
+            }
+
+            return ['completed_day_counts' => $completedDayCounts, 'pre_week_count' => $preWeekCount];
+
+        } catch (\Exception $e) {
+            Log::warning('[WEEKLY_PLAN] Exception in getSessionAnalysis', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return ['completed_day_counts' => [], 'pre_week_count' => 0];
         }
     }
 
