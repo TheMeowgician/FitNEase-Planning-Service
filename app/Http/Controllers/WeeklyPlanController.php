@@ -90,6 +90,40 @@ class WeeklyPlanController extends Controller
                 $weeklyPlanData = $this->generateFallbackPlan($userData, $request->bearerToken());
             }
 
+            // Preserve exercise data for already-completed days so mid-week tier changes
+            // don't overwrite what the user actually did (client sends completed_dates)
+            $preservedDayData = [];
+            if ($existingPlan) {
+                $completedDatesStr = $request->input('completed_dates', '');
+                $completedDates = $completedDatesStr
+                    ? array_filter(array_map('trim', explode(',', $completedDatesStr)))
+                    : [];
+
+                if (!empty($completedDates)) {
+                    $existingPlanData = $existingPlan->plan_data ?? [];
+                    foreach ($completedDates as $dateStr) {
+                        try {
+                            $dayName = strtolower(Carbon::parse($dateStr)->format('l'));
+                            if (isset($existingPlanData[$dayName])) {
+                                $preservedDayData[$dayName] = $existingPlanData[$dayName];
+                            }
+                        } catch (\Exception $e) {
+                            // Skip invalid date strings
+                        }
+                    }
+                }
+            }
+
+            // Restore preserved exercises into new plan data
+            if (!empty($preservedDayData)) {
+                foreach ($preservedDayData as $dayName => $dayData) {
+                    $weeklyPlanData['plan_data'][$dayName] = $dayData;
+                }
+                Log::info('[WEEKLY_PLAN] Preserved exercise data for completed days', [
+                    'days' => array_keys($preservedDayData),
+                ]);
+            }
+
             // Calculate week end date (Sunday)
             $weekEndDate = $weekStartDate->copy()->endOfWeek();
 
@@ -296,10 +330,11 @@ class WeeklyPlanController extends Controller
             }
 
             if ($shouldRegenerate) {
-                // Regenerate the plan
+                // Regenerate the plan, forwarding completed_dates so already-done days keep their exercises
                 $regenerateResponse = $this->generateWeeklyPlan(new Request([
                     'user_id' => $userId,
-                    'regenerate' => !is_null($plan)
+                    'regenerate' => !is_null($plan),
+                    'completed_dates' => $request->query('completed_dates', ''),
                 ]));
 
                 // If regeneration failed, return the error response
