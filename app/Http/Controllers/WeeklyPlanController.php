@@ -97,8 +97,24 @@ class WeeklyPlanController extends Controller
             $weeklyPlanData = $this->callMLPlanGeneration($userData);
 
             if (!$weeklyPlanData) {
-                // Fallback to simple distribution if ML service fails
-                Log::warning('[WEEKLY_PLAN] ML service failed, using fallback');
+                if ($regenerate && $existingPlan) {
+                    // ML unavailable during regeneration — preserve the existing plan rather
+                    // than storing a wrong fallback. The client will retry on next load,
+                    // at which point ML will likely be available again.
+                    Log::warning('[WEEKLY_PLAN] ML unavailable during regen, preserving existing plan', [
+                        'user_id' => $userId,
+                        'plan_id' => $existingPlan->plan_id,
+                    ]);
+                    return response()->json([
+                        'success' => true,
+                        'message' => 'Weekly plan unchanged (ML service temporarily unavailable)',
+                        'data' => $existingPlan,
+                        'regenerated' => false,
+                        'ml_unavailable' => true,
+                    ]);
+                }
+                // First-time plan creation — no existing plan to fall back to, use simple distribution
+                Log::warning('[WEEKLY_PLAN] ML service failed, using fallback for new plan');
                 $weeklyPlanData = $this->generateFallbackPlan($userData, $request->bearerToken());
             }
 
