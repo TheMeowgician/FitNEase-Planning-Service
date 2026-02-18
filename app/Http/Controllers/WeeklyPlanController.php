@@ -122,6 +122,8 @@ class WeeklyPlanController extends Controller
                     'preferred_workout_days' => $userData['preferred_workout_days'],
                     'target_muscle_groups' => $userData['target_muscle_groups'],
                     'time_constraints' => $userData['time_constraints'],
+                    'session_count' => $weeklyPlanData['session_count'] ?? 0,
+                    'session_tier' => $weeklyPlanData['session_tier'] ?? 1,
                 ],
             ]);
 
@@ -275,6 +277,21 @@ class WeeklyPlanController extends Controller
                 if ($request->query('force_regenerate') === 'true') {
                     Log::info('[WEEKLY_PLAN] Force regenerate requested');
                     $shouldRegenerate = true;
+                }
+
+                // Check if user's progressive overload tier has advanced since plan was generated
+                $clientSessionCount = (int) $request->query('session_count', -1);
+                if (!$shouldRegenerate && $clientSessionCount >= 0) {
+                    $storedTier = $plan->user_preferences_snapshot['session_tier'] ?? 1;
+                    $currentTier = $this->getSessionTier($clientSessionCount);
+                    if ($currentTier > $storedTier) {
+                        Log::info('[WEEKLY_PLAN] Session tier advanced, regenerating', [
+                            'stored_tier' => $storedTier,
+                            'current_tier' => $currentTier,
+                            'session_count' => $clientSessionCount,
+                        ]);
+                        $shouldRegenerate = true;
+                    }
                 }
             }
 
@@ -574,6 +591,8 @@ class WeeklyPlanController extends Controller
                         'ml_generated' => true,
                         'ml_confidence_score' => $mlData['metadata']['confidence_score'] ?? null,
                         'generation_method' => 'ml_auto',
+                        'session_count' => $mlData['metadata']['session_count'] ?? 0,
+                        'session_tier' => $mlData['metadata']['session_tier'] ?? 1,
                     ];
                 }
 
@@ -895,6 +914,13 @@ class WeeklyPlanController extends Controller
      * @param string $fitnessLevel
      * @return array [min, max]
      */
+    protected function getSessionTier(int $sessionCount): int
+    {
+        if ($sessionCount < 6) return 1;
+        if ($sessionCount < 16) return 2;
+        return 3;
+    }
+
     protected function getExercisesRangeByFitnessLevel(string $fitnessLevel): array
     {
         return match($fitnessLevel) {
