@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\WeeklyWorkoutPlan;
+use App\Services\ProgressiveOverload;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Http;
@@ -81,6 +82,17 @@ class WeeklyPlanController extends Controller
                 ], 500);
             }
 
+            // Pillar 1: PHP is the single source of truth for exercise count.
+            // When client_session_count is provided (auto-regen path), PHP computes
+            // the authoritative exercises_per_day and passes it to ML, so ML never
+            // uses its own tracking query or time-cap formula for this value.
+            $clientSessionCountForRegen = (int) $request->input('client_session_count', -1);
+            if ($clientSessionCountForRegen >= 0) {
+                $baseForML = ProgressiveOverload::getBaseCount($userData['fitness_level'] ?? 'beginner');
+                $userData['session_count'] = $clientSessionCountForRegen;
+                $userData['exercises_per_day'] = $baseForML + (ProgressiveOverload::getSessionTier($clientSessionCountForRegen) - 1);
+            }
+
             // Call ML service to generate weekly plan
             $weeklyPlanData = $this->callMLPlanGeneration($userData);
 
@@ -125,8 +137,8 @@ class WeeklyPlanController extends Controller
                 }
             }
 
-            $base = $this->getExercisesCountByFitnessLevel($userData['fitness_level'] ?? 'beginner');
-            $pastMissedTierCount = $base + ($this->getSessionTier(max(0, $preWeekCount)) - 1);
+            $base = ProgressiveOverload::getBaseCount($userData['fitness_level'] ?? 'beginner');
+            $pastMissedTierCount = $base + (ProgressiveOverload::getSessionTier(max(0, $preWeekCount)) - 1);
 
             $daysOfWeek = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
             $today = strtolower(Carbon::now()->format('l'));
@@ -161,6 +173,24 @@ class WeeklyPlanController extends Controller
                     'trimmed_to' => $pastMissedTierCount,
                     'pre_week_count' => $preWeekCount,
                 ]);
+            }
+            unset($dayData);
+
+            // Safety net: enforce correct tier count for future/today uncompleted days.
+            // Catches cases where ML returned wrong count (stale cache, time-cap, or
+            // different session query). $base and $clientSessionCountForRegen are
+            // already in scope from above.
+            $currentTierCountForRegen = $clientSessionCountForRegen >= 0
+                ? $base + (ProgressiveOverload::getSessionTier($clientSessionCountForRegen) - 1)
+                : $base + (($weeklyPlanData['session_tier'] ?? 1) - 1);
+
+            foreach ($weeklyPlanData['plan_data'] as $dayName => &$dayData) {
+                if (!($dayData['planned'] ?? false)) continue;
+                if (in_array($dayName, $completedDayNames)) continue;
+                $dayIndex = array_search(strtolower($dayName), $daysOfWeek);
+                if ($dayIndex === false || $dayIndex < $todayIndex) continue; // Past day — already handled
+                if (!isset($dayData['exercises'])) continue;
+                $dayData['exercises'] = array_slice($dayData['exercises'], 0, $currentTierCountForRegen);
             }
             unset($dayData);
 
@@ -265,7 +295,7 @@ class WeeklyPlanController extends Controller
                 // Check for out-of-range exercise counts (indicates old buggy generation)
                 // Using RANGE check to support progressive overload (not a fixed expected count)
                 $planData = $plan->plan_data ?? [];
-                [$minCount, $maxCount] = $this->getExercisesRangeByFitnessLevel($plan->user_preferences_snapshot['fitness_level'] ?? 'beginner');
+                [$minCount, $maxCount] = ProgressiveOverload::getExerciseBounds($plan->user_preferences_snapshot['fitness_level'] ?? 'beginner');
                 $hasInconsistentCounts = false;
 
                 foreach ($planData as $dayName => $dayData) {
@@ -357,7 +387,7 @@ class WeeklyPlanController extends Controller
                 $clientSessionCount = (int) $request->query('session_count', -1);
                 if (!$shouldRegenerate && $clientSessionCount >= 0) {
                     $storedTier = $plan->user_preferences_snapshot['session_tier'] ?? 1;
-                    $currentTier = $this->getSessionTier($clientSessionCount);
+                    $currentTier = ProgressiveOverload::getSessionTier($clientSessionCount);
                     if ($currentTier > $storedTier) {
                         Log::info('[WEEKLY_PLAN] Session tier advanced, regenerating', [
                             'stored_tier' => $storedTier,
@@ -409,9 +439,9 @@ class WeeklyPlanController extends Controller
                 // Check 3: Uncompleted days with wrong exercise count for their expected tier.
                 // Past missed days use pre-week tier; future/today days use current tier.
                 if (!$shouldRegenerate && $clientSessionCount >= 0) {
-                    $base = $this->getExercisesCountByFitnessLevel($fitnessLevel);
-                    $currentTierCount = $base + ($this->getSessionTier($clientSessionCount) - 1);
-                    $preWeekTierCount = $base + ($this->getSessionTier($preWeekCount) - 1);
+                    $base = ProgressiveOverload::getBaseCount($fitnessLevel);
+                    $currentTierCount = $base + (ProgressiveOverload::getSessionTier($clientSessionCount) - 1);
+                    $preWeekTierCount = $base + (ProgressiveOverload::getSessionTier($preWeekCount) - 1);
                     $completedDayNames = array_keys($completedDayCounts);
                     $daysOfWeek = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
                     $todayName = strtolower(Carbon::now()->format('l'));
@@ -446,6 +476,7 @@ class WeeklyPlanController extends Controller
                         ? json_encode($completedDayCounts)
                         : null,
                     'pre_week_session_count' => $preWeekCount,
+                    'client_session_count' => $clientSessionCount >= 0 ? $clientSessionCount : null,
                 ]));
 
                 // If regeneration failed, return the error response
@@ -707,6 +738,9 @@ class WeeklyPlanController extends Controller
                     'target_muscle_groups' => $userData['target_muscle_groups'],
                     'goals' => $userData['fitness_goals'],
                     'time_constraints' => $userData['time_constraints'],
+                    // Pillar 1: pass PHP-authoritative counts so ML doesn't recompute
+                    'session_count' => $userData['session_count'] ?? null,
+                    'exercises_per_day' => $userData['exercises_per_day'] ?? null,
                 ]);
 
                 $duration = (microtime(true) - $startTime) * 1000; // Convert to milliseconds
@@ -811,7 +845,7 @@ class WeeklyPlanController extends Controller
         $totalCalories = 0;
 
         // Fetch exercises ONCE for all days to get variety
-        $exercisesPerDay = $this->getExercisesCountByFitnessLevel($userData['fitness_level']);
+        $exercisesPerDay = ProgressiveOverload::getBaseCount($userData['fitness_level']);
         $totalNeededExercises = count($preferredDays) * $exercisesPerDay;
 
         // Fetch MANY more exercises to ensure we have enough unique ones
@@ -1125,7 +1159,7 @@ class WeeklyPlanController extends Controller
 
             // Base exercise count for tier 1 of this fitness level.
             // Each tier adds one more exercise: tier N → base + (N-1).
-            $base   = $this->getExercisesCountByFitnessLevel($fitnessLevel);
+            $base   = ProgressiveOverload::getBaseCount($fitnessLevel);
             $result = [];        // ['day_name' => expected_count]
             $cumulative = 0;    // running total of individual completed sessions
 
@@ -1143,7 +1177,7 @@ class WeeklyPlanController extends Controller
 
                     // Use the FIRST session on each day to determine that day's tier
                     if (!isset($result[$dayName])) {
-                        $tierAtTime   = $this->getSessionTier($cumulative);
+                        $tierAtTime   = ProgressiveOverload::getSessionTier($cumulative);
                         $result[$dayName] = $base + ($tierAtTime - 1);
                     }
                 } catch (\Exception $e) {
@@ -1208,7 +1242,7 @@ class WeeklyPlanController extends Controller
             });
 
             $weekEnd->setTime(23, 59, 59);
-            $base               = $this->getExercisesCountByFitnessLevel($fitnessLevel);
+            $base               = ProgressiveOverload::getBaseCount($fitnessLevel);
             $completedDayCounts = [];
             $preWeekCount       = 0;
             $cumulative         = 0;
@@ -1226,7 +1260,7 @@ class WeeklyPlanController extends Controller
                     }
                     $dayName = strtolower($sessionDate->format('l'));
                     if (!isset($completedDayCounts[$dayName])) {
-                        $tierAtTime = $this->getSessionTier($cumulative);
+                        $tierAtTime = ProgressiveOverload::getSessionTier($cumulative);
                         $completedDayCounts[$dayName] = $base + ($tierAtTime - 1);
                     }
                 } catch (\Exception $e) {}
@@ -1241,42 +1275,6 @@ class WeeklyPlanController extends Controller
             ]);
             return ['completed_day_counts' => [], 'pre_week_count' => 0];
         }
-    }
-
-    protected function getSessionTier(int $sessionCount): int
-    {
-        if ($sessionCount < 6) return 1;
-        if ($sessionCount < 16) return 2;
-        return 3;
-    }
-
-    protected function getExercisesRangeByFitnessLevel(string $fitnessLevel): array
-    {
-        return match($fitnessLevel) {
-            'beginner'     => [4, 6],
-            'intermediate' => [6, 8],
-            'advanced'     => [8, 12],
-            default        => [4, 6],
-        };
-    }
-
-    /**
-     * Helper: Get the starting (minimum) exercise count for a fitness level.
-     *
-     * Returns the lowest valid count for that level — used by fallback plan
-     * generation and day reallocation when session count is unavailable.
-     *
-     * @param string $fitnessLevel
-     * @return int
-     */
-    protected function getExercisesCountByFitnessLevel(string $fitnessLevel): int
-    {
-        return match($fitnessLevel) {
-            'beginner'     => 4,   // Minimum of beginner range  (4–6)
-            'intermediate' => 6,   // Minimum of intermediate range (6–8)
-            'advanced'     => 8,   // Minimum of advanced range (8–12)
-            default        => 4,
-        };
     }
 
     /**
@@ -1525,7 +1523,7 @@ class WeeklyPlanController extends Controller
         ]);
 
         // Step 2: Distribute orphaned exercises to new days
-        $exercisesPerDay = $this->getExercisesCountByFitnessLevel(
+        $exercisesPerDay = ProgressiveOverload::getBaseCount(
             $plan->user_preferences_snapshot['fitness_level'] ?? 'beginner'
         );
 
