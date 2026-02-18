@@ -186,20 +186,21 @@ class WeeklyPlanController extends Controller
                 Log::info('[WEEKLY_PLAN] No current plan found, generating new one');
                 $shouldRegenerate = true;
             } else {
-                // Check for inconsistent exercise counts (indicates old buggy generation)
+                // Check for out-of-range exercise counts (indicates old buggy generation)
+                // Using RANGE check to support progressive overload (not a fixed expected count)
                 $planData = $plan->plan_data ?? [];
-                $expectedExercisesPerDay = $this->getExercisesCountByFitnessLevel($plan->user_preferences_snapshot['fitness_level'] ?? 'beginner');
+                [$minCount, $maxCount] = $this->getExercisesRangeByFitnessLevel($plan->user_preferences_snapshot['fitness_level'] ?? 'beginner');
                 $hasInconsistentCounts = false;
 
                 foreach ($planData as $dayName => $dayData) {
                     if (isset($dayData['planned']) && $dayData['planned'] && isset($dayData['exercises'])) {
                         $exerciseCount = count($dayData['exercises']);
-                        if ($exerciseCount !== $expectedExercisesPerDay && $exerciseCount > 0) {
+                        if ($exerciseCount > 0 && ($exerciseCount < $minCount || $exerciseCount > $maxCount)) {
                             $hasInconsistentCounts = true;
-                            Log::info('[WEEKLY_PLAN] Detected inconsistent exercise count', [
+                            Log::info('[WEEKLY_PLAN] Detected out-of-range exercise count', [
                                 'day' => $dayName,
                                 'count' => $exerciseCount,
-                                'expected' => $expectedExercisesPerDay
+                                'valid_range' => "{$minCount}-{$maxCount}",
                             ]);
                             break;
                         }
@@ -881,7 +882,34 @@ class WeeklyPlanController extends Controller
     }
 
     /**
-     * Helper: Get number of exercises per day based on fitness level
+     * Helper: Get the valid exercise count range for a fitness level.
+     *
+     * Progressive overload ranges (per professor requirements):
+     *   Beginner:     4–6  exercises
+     *   Intermediate: 6–8  exercises
+     *   Advanced:     8–12 exercises
+     *
+     * Used for the inconsistency check so plans with progressive overload
+     * counts are NOT incorrectly flagged and force-regenerated.
+     *
+     * @param string $fitnessLevel
+     * @return array [min, max]
+     */
+    protected function getExercisesRangeByFitnessLevel(string $fitnessLevel): array
+    {
+        return match($fitnessLevel) {
+            'beginner'     => [4, 6],
+            'intermediate' => [6, 8],
+            'advanced'     => [8, 12],
+            default        => [4, 6],
+        };
+    }
+
+    /**
+     * Helper: Get the starting (minimum) exercise count for a fitness level.
+     *
+     * Returns the lowest valid count for that level — used by fallback plan
+     * generation and day reallocation when session count is unavailable.
      *
      * @param string $fitnessLevel
      * @return int
@@ -889,10 +917,10 @@ class WeeklyPlanController extends Controller
     protected function getExercisesCountByFitnessLevel(string $fitnessLevel): int
     {
         return match($fitnessLevel) {
-            'beginner' => 4,
-            'intermediate' => 5,
-            'advanced' => 6,
-            default => 4,
+            'beginner'     => 4,   // Minimum of beginner range  (4–6)
+            'intermediate' => 6,   // Minimum of intermediate range (6–8)
+            'advanced'     => 8,   // Minimum of advanced range (8–12)
+            default        => 4,
         };
     }
 
