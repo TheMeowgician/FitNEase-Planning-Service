@@ -91,13 +91,25 @@ class WeeklyPlanController extends Controller
             }
 
             // Preserve exercise data for already-completed days so mid-week tier changes
-            // don't overwrite what the user actually did (client sends completed_dates)
+            // don't overwrite what the user actually did.
+            // We query the tracking service directly so this works regardless of which
+            // page triggered regeneration (workouts page never sends completed_dates).
             $preservedDayData = [];
             if ($existingPlan) {
-                $completedDatesStr = $request->input('completed_dates', '');
-                $completedDates = $completedDatesStr
-                    ? array_filter(array_map('trim', explode(',', $completedDatesStr)))
-                    : [];
+                // Primary: query tracking service internally
+                $completedDates = $this->getCompletedDaysThisWeek(
+                    (int) $userId,
+                    $weekStartDate,
+                    $weekStartDate->copy()->endOfWeek()
+                );
+
+                // Fallback: use client-sent completed_dates if tracking service returned nothing
+                if (empty($completedDates)) {
+                    $completedDatesStr = $request->input('completed_dates', '');
+                    if ($completedDatesStr) {
+                        $completedDates = array_filter(array_map('trim', explode(',', $completedDatesStr)));
+                    }
+                }
 
                 if (!empty($completedDates)) {
                     $existingPlanData = $existingPlan->plan_data ?? [];
@@ -949,6 +961,82 @@ class WeeklyPlanController extends Controller
      * @param string $fitnessLevel
      * @return array [min, max]
      */
+    /**
+     * Helper: Query tracking service to find which dates this week the user
+     * has already completed an individual workout session.
+     *
+     * Called from generateWeeklyPlan so preservation works regardless of which
+     * client page triggered the regeneration.
+     *
+     * @param int $userId
+     * @param Carbon $weekStart
+     * @param Carbon $weekEnd
+     * @return array Date strings in 'Y-m-d' format
+     */
+    protected function getCompletedDaysThisWeek(int $userId, Carbon $weekStart, Carbon $weekEnd): array
+    {
+        try {
+            $trackingUrl = env('TRACKING_SERVICE_URL', 'http://fitnease-tracking');
+            $internalToken = env('INTERNAL_SERVICE_TOKEN');
+
+            // ml-internal endpoint has no auth middleware — safe for service-to-service calls
+            $response = Http::timeout(5)
+                ->withHeaders(['X-Internal-Secret' => $internalToken])
+                ->get("{$trackingUrl}/api/ml-internal/user-sessions/{$userId}", [
+                    'per_page' => 500,
+                ]);
+
+            if (!$response->successful()) {
+                Log::warning('[WEEKLY_PLAN] Tracking service returned non-success when fetching completed days', [
+                    'user_id' => $userId,
+                    'status' => $response->status(),
+                ]);
+                return [];
+            }
+
+            $data = $response->json();
+            // Laravel paginate() serialises as { data: { data: [...], ... } }
+            $sessions = $data['data']['data'] ?? [];
+
+            $weekEnd->setTime(23, 59, 59);
+            $completedDates = [];
+
+            foreach ($sessions as $session) {
+                if (($session['session_type'] ?? '') !== 'individual') {
+                    continue;
+                }
+                if (!($session['is_completed'] ?? false)) {
+                    continue;
+                }
+
+                try {
+                    $sessionDate = Carbon::parse($session['created_at']);
+                    if ($sessionDate->between($weekStart, $weekEnd)) {
+                        $completedDates[] = $sessionDate->format('Y-m-d');
+                    }
+                } catch (\Exception $e) {
+                    // Skip sessions with unparseable dates
+                }
+            }
+
+            $unique = array_values(array_unique($completedDates));
+
+            Log::info('[WEEKLY_PLAN] Fetched completed days this week from tracking service', [
+                'user_id' => $userId,
+                'completed_dates' => $unique,
+            ]);
+
+            return $unique;
+
+        } catch (\Exception $e) {
+            Log::warning('[WEEKLY_PLAN] Exception querying tracking service for completed days', [
+                'user_id' => $userId,
+                'error' => $e->getMessage(),
+            ]);
+            return [];
+        }
+    }
+
     protected function getSessionTier(int $sessionCount): int
     {
         if ($sessionCount < 6) return 1;
