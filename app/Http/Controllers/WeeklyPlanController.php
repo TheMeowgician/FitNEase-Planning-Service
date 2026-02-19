@@ -270,7 +270,10 @@ class WeeklyPlanController extends Controller
 
             Log::info('[WEEKLY_PLAN] Plan created successfully', [
                 'plan_id' => $plan->plan_id,
-                'workout_days' => $plan->total_workout_days
+                'workout_days' => $plan->total_workout_days,
+                'stored_session_tier' => $plan->user_preferences_snapshot['session_tier'] ?? 'NULL',
+                'stored_session_count' => $plan->user_preferences_snapshot['session_count'] ?? 'NULL',
+                'client_session_count_used' => $clientSessionCountForRegen,
             ]);
 
             return response()->json([
