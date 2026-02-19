@@ -240,6 +240,14 @@ class WeeklyPlanController extends Controller
                 $existingPlan->delete();
             }
 
+            // Clear is_current_week flag on any older plans for this user that are
+            // still marked as current. This prevents orphaned plans from previous
+            // weeks being returned by the currentWeek() scope, which has no ORDER BY.
+            WeeklyWorkoutPlan::where('user_id', $userId)
+                ->where('is_current_week', true)
+                ->where('week_start_date', '<', $weekStartDate)
+                ->update(['is_current_week' => false, 'is_active' => false]);
+
             // Create new weekly plan
             $plan = WeeklyWorkoutPlan::create([
                 'user_id' => $userId,
