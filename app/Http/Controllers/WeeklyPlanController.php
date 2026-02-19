@@ -82,6 +82,19 @@ class WeeklyPlanController extends Controller
                 ], 500);
             }
 
+            // force_fresh=true means the user manually pressed "Regenerate Plan".
+            // We pass a random week_seed to ML so a genuinely different exercise set is produced.
+            // Auto-regen (system-triggered) never sets force_fresh, so it stays on the
+            // deterministic ISO-week seed — invisible and consistent for the user.
+            $forceFresh = (bool) $request->input('force_fresh', false);
+            if ($forceFresh) {
+                // Use range 1000–99999 to avoid colliding with ISO week numbers (1–53)
+                $userData['week_seed'] = rand(1000, 99999);
+                Log::info('[WEEKLY_PLAN] force_fresh=true, using random week_seed', [
+                    'week_seed' => $userData['week_seed'],
+                ]);
+            }
+
             // Pillar 1: PHP is the single source of truth for exercise count.
             // When client_session_count is provided (auto-regen path), PHP computes
             // the authoritative exercises_per_day and passes it to ML, so ML never
@@ -180,9 +193,33 @@ class WeeklyPlanController extends Controller
             $todayIndex = array_search($today, $daysOfWeek);
             $completedDayNames = array_keys($completedDayCounts);
 
-            // Trim completed days to their actual tier count at completion time
+            // When force_fresh is set, the ML returned a brand-new exercise pool.
+            // Completed days must show the EXACT exercises the user already did —
+            // not the first N exercises from an unrelated random pool.
+            // Capture them from the existing plan before we apply any trimming.
+            $preservedCompletedExercises = [];
+            if ($forceFresh && $existingPlan && !empty($completedDayCounts)) {
+                foreach (array_keys($completedDayCounts) as $dayName) {
+                    $dayData = $existingPlan->plan_data[$dayName] ?? [];
+                    if (!empty($dayData['exercises'])) {
+                        $preservedCompletedExercises[$dayName] = $dayData['exercises'];
+                    }
+                }
+            }
+
+            // Trim/restore completed days:
+            // - force_fresh:  restore exact exercises from the old plan (user already did these)
+            // - normal regen: trim to the correct count from the new ML pool (same seed = same exercises)
             foreach ($completedDayCounts as $dayName => $expectedCount) {
-                if ($expectedCount > 0 && isset($weeklyPlanData['plan_data'][$dayName]['exercises'])) {
+                if (!isset($weeklyPlanData['plan_data'][$dayName])) continue;
+                if (isset($preservedCompletedExercises[$dayName])) {
+                    // Restore exactly what the user did — don't touch the new ML pool
+                    $weeklyPlanData['plan_data'][$dayName]['exercises'] = $preservedCompletedExercises[$dayName];
+                    Log::info('[WEEKLY_PLAN] Restored exercises for completed day (force_fresh)', [
+                        'day' => $dayName,
+                        'count' => count($preservedCompletedExercises[$dayName]),
+                    ]);
+                } elseif ($expectedCount > 0) {
                     $weeklyPlanData['plan_data'][$dayName]['exercises'] = array_slice(
                         $weeklyPlanData['plan_data'][$dayName]['exercises'],
                         0,
@@ -789,6 +826,8 @@ class WeeklyPlanController extends Controller
                     // Pillar 1: pass PHP-authoritative counts so ML doesn't recompute
                     'session_count' => $userData['session_count'] ?? null,
                     'exercises_per_day' => $userData['exercises_per_day'] ?? null,
+                    // Optional random seed for force_fresh manual regenerations
+                    'week_seed' => $userData['week_seed'] ?? null,
                 ]);
 
                 $duration = (microtime(true) - $startTime) * 1000; // Convert to milliseconds
