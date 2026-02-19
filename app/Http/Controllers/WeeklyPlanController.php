@@ -93,6 +93,25 @@ class WeeklyPlanController extends Controller
                 $userData['exercises_per_day'] = $baseForML + (ProgressiveOverload::getSessionTier($clientSessionCountForRegen) - 1);
             }
 
+            // When client_session_count is not provided (e.g. direct "Regenerate" button call),
+            // derive it from the tracking service BEFORE calling ML so that:
+            // 1. ML receives the correct exercises_per_day for the user's actual tier.
+            // 2. The stored snapshot records the authoritative session_tier (stops infinite
+            //    regeneration loops caused by ML metadata always returning session_tier=1).
+            $cachedAnalysis = null;
+            if ($clientSessionCountForRegen < 0) {
+                $cachedAnalysis = $this->getSessionAnalysis(
+                    (int) $userId,
+                    $weekStartDate,
+                    $weekStartDate->copy()->endOfWeek(),
+                    $userData['fitness_level'] ?? 'beginner'
+                );
+                $clientSessionCountForRegen = $cachedAnalysis['pre_week_count'] + count($cachedAnalysis['completed_day_counts']);
+                $baseForML = ProgressiveOverload::getBaseCount($userData['fitness_level'] ?? 'beginner');
+                $userData['session_count'] = $clientSessionCountForRegen;
+                $userData['exercises_per_day'] = $baseForML + (ProgressiveOverload::getSessionTier($clientSessionCountForRegen) - 1);
+            }
+
             // Call ML service to generate weekly plan
             $weeklyPlanData = $this->callMLPlanGeneration($userData);
 
@@ -139,7 +158,7 @@ class WeeklyPlanController extends Controller
             }
 
             if ((empty($completedDayCounts) && $existingPlan) || $preWeekCount < 0) {
-                $analysis = $this->getSessionAnalysis(
+                $analysis = $cachedAnalysis ?? $this->getSessionAnalysis(
                     (int) $userId,
                     $weekStartDate,
                     $weekStartDate->copy()->endOfWeek(),
@@ -242,8 +261,10 @@ class WeeklyPlanController extends Controller
                     'preferred_workout_days' => $userData['preferred_workout_days'],
                     'target_muscle_groups' => $userData['target_muscle_groups'],
                     'time_constraints' => $userData['time_constraints'],
-                    'session_count' => $weeklyPlanData['session_count'] ?? 0,
-                    'session_tier' => $weeklyPlanData['session_tier'] ?? 1,
+                    'session_count' => $clientSessionCountForRegen >= 0 ? $clientSessionCountForRegen : ($weeklyPlanData['session_count'] ?? 0),
+                    'session_tier' => $clientSessionCountForRegen >= 0
+                        ? ProgressiveOverload::getSessionTier($clientSessionCountForRegen)
+                        : ($weeklyPlanData['session_tier'] ?? 1),
                 ],
             ]);
 
