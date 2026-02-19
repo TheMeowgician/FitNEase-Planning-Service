@@ -603,15 +603,16 @@ class WeeklyPlanController extends Controller
             ]);
 
         } catch (\Exception $e) {
-            Log::error('[WEEKLY_PLAN] Failed to fetch current plan', [
+            Log::warning('[WEEKLY_PLAN] Could not fetch or generate plan, returning empty state', [
                 'error' => $e->getMessage()
             ]);
 
             return response()->json([
-                'success' => false,
-                'message' => 'Failed to fetch current plan',
-                'error' => $e->getMessage()
-            ], 500);
+                'success' => true,
+                'data' => null,
+                'no_plan' => true,
+                'message' => 'No plan available'
+            ], 200);
         }
     }
 
