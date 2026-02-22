@@ -125,6 +125,14 @@ class WeeklyPlanController extends Controller
                 $userData['exercises_per_day'] = $baseForML + (ProgressiveOverload::getSessionTier($clientSessionCountForRegen) - 1);
             }
 
+            // Cap exercises_per_day by the user's time_constraints preference.
+            // Inverse of Tabata formula (300n - 60 seconds): maxExercises = floor((minutes*60 + 60) / 300)
+            // Uses max($maxByTime, $baseForML) so promotion to a higher level is never restricted
+            // below that level's base exercise count.
+            $timeConstraints = $userData['time_constraints'] ?? 30;
+            $maxByTime = (int) floor(($timeConstraints * 60 + 60) / 300);
+            $userData['exercises_per_day'] = min($userData['exercises_per_day'], max($maxByTime, $baseForML));
+
             // Call ML service to generate weekly plan
             $weeklyPlanData = $this->callMLPlanGeneration($userData);
 
