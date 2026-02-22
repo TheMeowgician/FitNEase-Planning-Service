@@ -125,13 +125,14 @@ class WeeklyPlanController extends Controller
                 $userData['exercises_per_day'] = $baseForML + (ProgressiveOverload::getSessionTier($clientSessionCountForRegen) - 1);
             }
 
-            // Cap exercises_per_day by the user's time_constraints preference.
-            // Inverse of Tabata formula (300n - 60 seconds): maxExercises = floor((minutes*60 + 60) / 300)
-            // Uses max($maxByTime, $baseForML) so promotion to a higher level is never restricted
-            // below that level's base exercise count.
+            // Reconcile exercises_per_day with the user's time_constraints preference.
+            // Inverse of Tabata formula (300n - 60 seconds): maxByTime = floor((minutes*60 + 60) / 300)
+            // The onboarding UI promises a specific exercise count per duration (20min=4, 25min=5, 30min=6),
+            // so the time preference acts as a FLOOR. Progressive overload can increase above it
+            // (e.g. tier 3 beginner = 6 even if user chose 25min=5) but never reduce below.
             $timeConstraints = $userData['time_constraints'] ?? 30;
             $maxByTime = (int) floor(($timeConstraints * 60 + 60) / 300);
-            $userData['exercises_per_day'] = min($userData['exercises_per_day'], max($maxByTime, $baseForML));
+            $userData['exercises_per_day'] = max($userData['exercises_per_day'], $maxByTime);
 
             // Call ML service to generate weekly plan
             $weeklyPlanData = $this->callMLPlanGeneration($userData);
@@ -194,7 +195,8 @@ class WeeklyPlanController extends Controller
             }
 
             $base = ProgressiveOverload::getBaseCount($userData['fitness_level'] ?? 'beginner');
-            $pastMissedTierCount = $base + (ProgressiveOverload::getSessionTier(max(0, $preWeekCount)) - 1);
+            $timeFloorForRegen = $maxByTime; // already computed above from time_constraints
+            $pastMissedTierCount = max($base + (ProgressiveOverload::getSessionTier(max(0, $preWeekCount)) - 1), $timeFloorForRegen);
 
             $daysOfWeek = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
             $today = strtolower(Carbon::now()->format('l'));
@@ -258,11 +260,11 @@ class WeeklyPlanController extends Controller
 
             // Safety net: enforce correct tier count for future/today uncompleted days.
             // Catches cases where ML returned wrong count (stale cache, time-cap, or
-            // different session query). $base and $clientSessionCountForRegen are
-            // already in scope from above.
+            // different session query). $base, $timeFloorForRegen and $clientSessionCountForRegen
+            // are already in scope from above.
             $currentTierCountForRegen = $clientSessionCountForRegen >= 0
-                ? $base + (ProgressiveOverload::getSessionTier($clientSessionCountForRegen) - 1)
-                : $base + (($weeklyPlanData['session_tier'] ?? 1) - 1);
+                ? max($base + (ProgressiveOverload::getSessionTier($clientSessionCountForRegen) - 1), $timeFloorForRegen)
+                : max($base + (($weeklyPlanData['session_tier'] ?? 1) - 1), $timeFloorForRegen);
 
             foreach ($weeklyPlanData['plan_data'] as $dayName => &$dayData) {
                 if (!($dayData['planned'] ?? false)) continue;
@@ -531,10 +533,14 @@ class WeeklyPlanController extends Controller
 
                 // Check 3: Uncompleted days with wrong exercise count for their expected tier.
                 // Past missed days use pre-week tier; future/today days use current tier.
+                // Apply time preference floor so plans generated with the time-aware formula
+                // are not flagged as mismatched against the raw progressive overload count.
                 if (!$shouldRegenerate && $clientSessionCount >= 0) {
                     $base = ProgressiveOverload::getBaseCount($fitnessLevel);
-                    $currentTierCount = $base + (ProgressiveOverload::getSessionTier($clientSessionCount) - 1);
-                    $preWeekTierCount = $base + (ProgressiveOverload::getSessionTier($preWeekCount) - 1);
+                    $timeConstraintsCheck = $plan->user_preferences_snapshot['time_constraints'] ?? 30;
+                    $timeFloor = (int) floor(($timeConstraintsCheck * 60 + 60) / 300);
+                    $currentTierCount = max($base + (ProgressiveOverload::getSessionTier($clientSessionCount) - 1), $timeFloor);
+                    $preWeekTierCount = max($base + (ProgressiveOverload::getSessionTier($preWeekCount) - 1), $timeFloor);
                     $completedDayNames = array_keys($completedDayCounts);
                     $daysOfWeek = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
                     $todayName = strtolower(Carbon::now()->format('l'));
@@ -941,7 +947,8 @@ class WeeklyPlanController extends Controller
         $totalCalories = 0;
 
         // Fetch exercises ONCE for all days to get variety
-        $exercisesPerDay = ProgressiveOverload::getBaseCount($userData['fitness_level']);
+        // Use the already-computed exercises_per_day (respects time preference + progressive overload)
+        $exercisesPerDay = $userData['exercises_per_day'] ?? ProgressiveOverload::getBaseCount($userData['fitness_level']);
         $totalNeededExercises = count($preferredDays) * $exercisesPerDay;
 
         // Fetch MANY more exercises to ensure we have enough unique ones
@@ -1619,9 +1626,12 @@ class WeeklyPlanController extends Controller
         ]);
 
         // Step 2: Distribute orphaned exercises to new days
-        $exercisesPerDay = ProgressiveOverload::getBaseCount(
-            $plan->user_preferences_snapshot['fitness_level'] ?? 'beginner'
-        );
+        // Use time preference as floor so day-change respects the onboarding promise
+        $fitnessLevelForAdapt = $plan->user_preferences_snapshot['fitness_level'] ?? 'beginner';
+        $timeConstraintsForAdapt = $plan->user_preferences_snapshot['time_constraints'] ?? 30;
+        $baseCountForAdapt = ProgressiveOverload::getBaseCount($fitnessLevelForAdapt);
+        $maxByTimeForAdapt = (int) floor(($timeConstraintsForAdapt * 60 + 60) / 300);
+        $exercisesPerDay = max($baseCountForAdapt, $maxByTimeForAdapt);
 
         $orphanIndex = 0;
         foreach ($addedDays as $day) {
