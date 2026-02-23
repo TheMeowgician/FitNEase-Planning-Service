@@ -125,14 +125,18 @@ class WeeklyPlanController extends Controller
                 $userData['exercises_per_day'] = $baseForML + (ProgressiveOverload::getSessionTier($clientSessionCountForRegen) - 1);
             }
 
-            // Reconcile exercises_per_day with the user's time_constraints preference.
-            // Inverse of Tabata formula (300n - 60 seconds): maxByTime = floor((minutes*60 + 60) / 300)
-            // The onboarding UI promises a specific exercise count per duration (20min=4, 25min=5, 30min=6),
-            // so the time preference acts as a FLOOR. Progressive overload can increase above it
-            // (e.g. tier 3 beginner = 6 even if user chose 25min=5) but never reduce below.
+            // Reconcile exercises_per_day with user's time_constraints AND fitness level bounds.
+            //
+            // Time preference (inverse Tabata formula): how many exercises fit in the chosen duration.
+            // This acts as a FLOOR (onboarding promised 20min=4, 25min=5, 30min=6).
+            //
+            // Fitness level CEILING: beginners cap at 6, intermediate at 8, advanced at 12.
+            // Without this cap, a beginner who chose 45min would get 9 exercises — far beyond
+            // what a beginner's body can handle, defeating the purpose of fitness-level scaling.
             $timeConstraints = $userData['time_constraints'] ?? 30;
             $maxByTime = (int) floor(($timeConstraints * 60 + 60) / 300);
-            $userData['exercises_per_day'] = max($userData['exercises_per_day'], $maxByTime);
+            [, $levelMax] = ProgressiveOverload::getExerciseBounds($userData['fitness_level'] ?? 'beginner');
+            $userData['exercises_per_day'] = min(max($userData['exercises_per_day'], $maxByTime), $levelMax);
 
             // Call ML service to generate weekly plan
             $weeklyPlanData = $this->callMLPlanGeneration($userData);
@@ -1631,7 +1635,8 @@ class WeeklyPlanController extends Controller
         $timeConstraintsForAdapt = $plan->user_preferences_snapshot['time_constraints'] ?? 30;
         $baseCountForAdapt = ProgressiveOverload::getBaseCount($fitnessLevelForAdapt);
         $maxByTimeForAdapt = (int) floor(($timeConstraintsForAdapt * 60 + 60) / 300);
-        $exercisesPerDay = max($baseCountForAdapt, $maxByTimeForAdapt);
+        [, $levelMaxForAdapt] = ProgressiveOverload::getExerciseBounds($fitnessLevelForAdapt);
+        $exercisesPerDay = min(max($baseCountForAdapt, $maxByTimeForAdapt), $levelMaxForAdapt);
 
         $orphanIndex = 0;
         foreach ($addedDays as $day) {
