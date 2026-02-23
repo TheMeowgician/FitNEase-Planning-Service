@@ -200,7 +200,7 @@ class WeeklyPlanController extends Controller
 
             $base = ProgressiveOverload::getBaseCount($userData['fitness_level'] ?? 'beginner');
             $timeFloorForRegen = $maxByTime; // already computed above from time_constraints
-            $pastMissedTierCount = max($base + (ProgressiveOverload::getSessionTier(max(0, $preWeekCount)) - 1), $timeFloorForRegen);
+            $pastMissedTierCount = min(max($base + (ProgressiveOverload::getSessionTier(max(0, $preWeekCount)) - 1), $timeFloorForRegen), $levelMax);
 
             $daysOfWeek = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
             $today = strtolower(Carbon::now()->format('l'));
@@ -267,8 +267,8 @@ class WeeklyPlanController extends Controller
             // different session query). $base, $timeFloorForRegen and $clientSessionCountForRegen
             // are already in scope from above.
             $currentTierCountForRegen = $clientSessionCountForRegen >= 0
-                ? max($base + (ProgressiveOverload::getSessionTier($clientSessionCountForRegen) - 1), $timeFloorForRegen)
-                : max($base + (($weeklyPlanData['session_tier'] ?? 1) - 1), $timeFloorForRegen);
+                ? min(max($base + (ProgressiveOverload::getSessionTier($clientSessionCountForRegen) - 1), $timeFloorForRegen), $levelMax)
+                : min(max($base + (($weeklyPlanData['session_tier'] ?? 1) - 1), $timeFloorForRegen), $levelMax);
 
             foreach ($weeklyPlanData['plan_data'] as $dayName => &$dayData) {
                 if (!($dayData['planned'] ?? false)) continue;
@@ -543,8 +543,9 @@ class WeeklyPlanController extends Controller
                     $base = ProgressiveOverload::getBaseCount($fitnessLevel);
                     $timeConstraintsCheck = $plan->user_preferences_snapshot['time_constraints'] ?? 30;
                     $timeFloor = (int) floor(($timeConstraintsCheck * 60 + 60) / 300);
-                    $currentTierCount = max($base + (ProgressiveOverload::getSessionTier($clientSessionCount) - 1), $timeFloor);
-                    $preWeekTierCount = max($base + (ProgressiveOverload::getSessionTier($preWeekCount) - 1), $timeFloor);
+                    [, $levelMaxCheck] = ProgressiveOverload::getExerciseBounds($fitnessLevel);
+                    $currentTierCount = min(max($base + (ProgressiveOverload::getSessionTier($clientSessionCount) - 1), $timeFloor), $levelMaxCheck);
+                    $preWeekTierCount = min(max($base + (ProgressiveOverload::getSessionTier($preWeekCount) - 1), $timeFloor), $levelMaxCheck);
                     $completedDayNames = array_keys($completedDayCounts);
                     $daysOfWeek = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
                     $todayName = strtolower(Carbon::now()->format('l'));
