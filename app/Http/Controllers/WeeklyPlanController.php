@@ -119,7 +119,7 @@ class WeeklyPlanController extends Controller
                     $weekStartDate->copy()->endOfWeek(),
                     $userData['fitness_level'] ?? 'beginner'
                 );
-                $clientSessionCountForRegen = $cachedAnalysis['pre_week_count'] + count($cachedAnalysis['completed_day_counts']);
+                $clientSessionCountForRegen = $cachedAnalysis['total_individual_count'] ?? ($cachedAnalysis['pre_week_count'] + count($cachedAnalysis['completed_day_counts']));
                 $baseForML = ProgressiveOverload::getBaseCount($userData['fitness_level'] ?? 'beginner');
                 $userData['session_count'] = $clientSessionCountForRegen;
                 $userData['exercises_per_day'] = $baseForML + (ProgressiveOverload::getSessionTier($clientSessionCountForRegen) - 1);
@@ -516,6 +516,17 @@ class WeeklyPlanController extends Controller
                 );
                 $completedDayCounts = $analysis['completed_day_counts'];
                 $preWeekCount = $analysis['pre_week_count'];
+
+                // When the client didn't provide session_count (e.g. dashboard),
+                // derive it from the analysis we just ran. Without this, Check 3
+                // (uncompleted day tier mismatch) is skipped entirely, causing the
+                // dashboard to return stale plans with wrong exercise counts.
+                if ($clientSessionCount < 0) {
+                    $clientSessionCount = $analysis['total_individual_count'] ?? ($preWeekCount + count($completedDayCounts));
+                    Log::info('[WEEKLY_PLAN] Derived session count from analysis', [
+                        'derived_count' => $clientSessionCount,
+                    ]);
+                }
 
                 // Check 2: Completed days with wrong exercise count
                 foreach ($completedDayCounts as $dayName => $expectedCount) {
@@ -1335,7 +1346,7 @@ class WeeklyPlanController extends Controller
                 ]);
 
             if (!$response->successful()) {
-                return ['completed_day_counts' => [], 'pre_week_count' => 0];
+                return ['completed_day_counts' => [], 'pre_week_count' => 0, 'total_individual_count' => 0];
             }
 
             $data     = $response->json();
@@ -1374,14 +1385,18 @@ class WeeklyPlanController extends Controller
                 } catch (\Exception $e) {}
             }
 
-            return ['completed_day_counts' => $completedDayCounts, 'pre_week_count' => $preWeekCount];
+            return [
+                'completed_day_counts' => $completedDayCounts,
+                'pre_week_count' => $preWeekCount,
+                'total_individual_count' => $cumulative,
+            ];
 
         } catch (\Exception $e) {
             Log::warning('[WEEKLY_PLAN] Exception in getSessionAnalysis', [
                 'user_id' => $userId,
                 'error'   => $e->getMessage(),
             ]);
-            return ['completed_day_counts' => [], 'pre_week_count' => 0];
+            return ['completed_day_counts' => [], 'pre_week_count' => 0, 'total_individual_count' => 0];
         }
     }
 
