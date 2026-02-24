@@ -117,7 +117,8 @@ class WeeklyPlanController extends Controller
                     (int) $userId,
                     $weekStartDate,
                     $weekStartDate->copy()->endOfWeek(),
-                    $userData['fitness_level'] ?? 'beginner'
+                    $userData['fitness_level'] ?? 'beginner',
+                    (int) ($userData['time_constraints'] ?? 30)
                 );
                 $clientSessionCountForRegen = $cachedAnalysis['total_individual_count'] ?? ($cachedAnalysis['pre_week_count'] + count($cachedAnalysis['completed_day_counts']));
                 $baseForML = ProgressiveOverload::getBaseCount($userData['fitness_level'] ?? 'beginner');
@@ -188,7 +189,8 @@ class WeeklyPlanController extends Controller
                     (int) $userId,
                     $weekStartDate,
                     $weekStartDate->copy()->endOfWeek(),
-                    $userData['fitness_level'] ?? 'beginner'
+                    $userData['fitness_level'] ?? 'beginner',
+                    (int) ($userData['time_constraints'] ?? 30)
                 );
                 if (empty($completedDayCounts)) {
                     $completedDayCounts = $analysis['completed_day_counts'];
@@ -506,13 +508,15 @@ class WeeklyPlanController extends Controller
             $preWeekCount = 0;
             if ($plan && !$shouldRegenerate) {
                 $fitnessLevel = $plan->user_preferences_snapshot['fitness_level'] ?? 'beginner';
+                $timeConstraintsPlan = (int) ($plan->user_preferences_snapshot['time_constraints'] ?? 30);
                 $weekStart = Carbon::now()->startOfWeek();
                 $weekEnd = Carbon::now()->endOfWeek();
                 $analysis = $this->getSessionAnalysis(
                     (int) $userId,
                     $weekStart,
                     $weekEnd,
-                    $fitnessLevel
+                    $fitnessLevel,
+                    $timeConstraintsPlan
                 );
                 $completedDayCounts = $analysis['completed_day_counts'];
                 $preWeekCount = $analysis['pre_week_count'];
@@ -1333,7 +1337,8 @@ class WeeklyPlanController extends Controller
         int $userId,
         Carbon $weekStart,
         Carbon $weekEnd,
-        string $fitnessLevel
+        string $fitnessLevel,
+        int $timeConstraints = 30
     ): array {
         try {
             $trackingUrl   = env('TRACKING_SERVICE_URL', 'http://fitnease-tracking');
@@ -1362,6 +1367,8 @@ class WeeklyPlanController extends Controller
 
             $weekEnd->setTime(23, 59, 59);
             $base               = ProgressiveOverload::getBaseCount($fitnessLevel);
+            $timeFloor          = (int) floor(($timeConstraints * 60 + 60) / 300);
+            [, $levelMax]       = ProgressiveOverload::getExerciseBounds($fitnessLevel);
             $completedDayCounts = [];
             $preWeekCount       = 0;
             $cumulative         = 0;
@@ -1380,7 +1387,8 @@ class WeeklyPlanController extends Controller
                     $dayName = strtolower($sessionDate->format('l'));
                     if (!isset($completedDayCounts[$dayName])) {
                         $tierAtTime = ProgressiveOverload::getSessionTier($cumulative);
-                        $completedDayCounts[$dayName] = $base + ($tierAtTime - 1);
+                        // Apply same formula as plan generation: max(progressive, timeFloor) capped at levelMax
+                        $completedDayCounts[$dayName] = min(max($base + ($tierAtTime - 1), $timeFloor), $levelMax);
                     }
                 } catch (\Exception $e) {}
             }
