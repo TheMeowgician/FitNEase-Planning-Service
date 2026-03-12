@@ -798,6 +798,9 @@ class WeeklyPlanController extends Controller
                     }
                 }
 
+                // Fetch recently completed exercise IDs to avoid repetition across weeks
+                $recentExerciseIds = $this->getRecentExerciseIds($userId);
+
                 return [
                     'user_id' => $userId,
                     'fitness_level' => $fitnessLevel,
@@ -807,6 +810,7 @@ class WeeklyPlanController extends Controller
                     'time_constraints' => $user['time_constraints_minutes'] ?? 30,
                     'activity_level' => $user['activity_level'] ?? 'moderate',
                     'workout_experience' => $user['workout_experience_years'] ?? 1,
+                    'recently_completed_exercise_ids' => $recentExerciseIds,
                 ];
             }
 
@@ -822,6 +826,40 @@ class WeeklyPlanController extends Controller
             ]);
 
             return null;
+        }
+    }
+
+    /**
+     * Fetch recently completed exercise IDs from tracking service (last 7 days).
+     * Used to prevent exercise repetition across weeks.
+     */
+    protected function getRecentExerciseIds(int $userId): array
+    {
+        try {
+            $trackingUrl = env('TRACKING_SERVICE_URL', 'http://fitnease-tracking');
+            $response = Http::timeout(5)->get("{$trackingUrl}/api/internal/users/{$userId}/recent-exercises", [
+                'days' => 7,
+            ]);
+
+            if ($response->successful()) {
+                $data = $response->json('data', []);
+                $ids = $data['exercise_ids'] ?? [];
+                Log::info('[WEEKLY_PLAN] Fetched recent exercise IDs for exclusion', [
+                    'user_id' => $userId,
+                    'count' => count($ids),
+                ]);
+                return $ids;
+            }
+
+            Log::warning('[WEEKLY_PLAN] Could not fetch recent exercises, proceeding without exclusion', [
+                'status' => $response->status(),
+            ]);
+            return [];
+        } catch (\Exception $e) {
+            Log::warning('[WEEKLY_PLAN] Exception fetching recent exercises, proceeding without exclusion', [
+                'error' => $e->getMessage(),
+            ]);
+            return [];
         }
     }
 
@@ -863,6 +901,8 @@ class WeeklyPlanController extends Controller
                     'exercises_per_day' => $userData['exercises_per_day'] ?? null,
                     // Optional random seed for force_fresh manual regenerations
                     'week_seed' => $userData['week_seed'] ?? null,
+                    // Prevent exercise repetition across weeks
+                    'exclude_exercise_ids' => $userData['recently_completed_exercise_ids'] ?? [],
                 ]);
 
                 $duration = (microtime(true) - $startTime) * 1000; // Convert to milliseconds
