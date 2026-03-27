@@ -235,7 +235,7 @@ class WeeklyPlanController extends Controller
                         'day' => $dayName,
                         'count' => count($preservedCompletedExercises[$dayName]),
                     ]);
-                } elseif ($expectedCount > 0) {
+                } elseif ($expectedCount > 0 && !empty($weeklyPlanData['plan_data'][$dayName]['exercises'])) {
                     $weeklyPlanData['plan_data'][$dayName]['exercises'] = array_slice(
                         $weeklyPlanData['plan_data'][$dayName]['exercises'],
                         0,
